@@ -18,10 +18,44 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from kernels import get_kernel
-cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+# For macOS MPS support, use a simpler attention implementation
+# Flash Attention is not available on MPS, so we'll use a fallback
+def simple_attention(q, k, v, causal=True, window_size=None):
+    """Simple attention implementation for MPS devices"""
+    B, T, H, D = q.shape
+    # Reshape for matmul
+    q = q.transpose(1, 2).contiguous().view(B * H, T, D)
+    k = k.transpose(1, 2).contiguous().view(B * H, T, D)
+    v = v.transpose(1, 2).contiguous().view(B * H, T, D)
+    
+    # Compute attention scores
+    scores = torch.bmm(q, k.transpose(1, 2)) / (D ** 0.5)
+    
+    # Apply causal mask if needed
+    if causal:
+        mask = torch.triu(torch.ones(T, T, device=q.device) * float('-inf'), diagonal=1)
+        scores = scores + mask
+    
+    # Apply window mask if specified
+    if window_size and window_size[0] > 0:
+        window = window_size[0]
+        mask = torch.triu(torch.ones(T, T, device=q.device) * float('-inf'), diagonal=window+1)
+        scores = scores + mask
+    
+    # Softmax and attention
+    attn_weights = F.softmax(scores, dim=-1)
+    attn_output = torch.bmm(attn_weights, v)
+    
+    # Reshape back
+    attn_output = attn_output.view(B, H, T, D).transpose(1, 2).contiguous()
+    return attn_output
+
+# Create a wrapper class to match the expected interface
+class FlashAttentionFallback:
+    def flash_attn_func(self, q, k, v, causal=True, window_size=None):
+        return simple_attention(q, k, v, causal=causal, window_size=window_size)
+
+fa3 = FlashAttentionFallback()
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -429,26 +463,26 @@ class MuonAdamW(torch.optim.Optimizer):
 # Hyperparameters (edit these directly, no CLI flags needed)
 # ---------------------------------------------------------------------------
 
-# Model architecture
-ASPECT_RATIO = 64       # model_dim = depth * ASPECT_RATIO
-HEAD_DIM = 128          # target head dimension for attention
-WINDOW_PATTERN = "SSSL" # sliding window pattern: L=full, S=half context
+# Model architecture - Adjusted for macOS MPS
+ASPECT_RATIO = 32       # model_dim = depth * ASPECT_RATIO (reduced for smaller models)
+HEAD_DIM = 64           # target head dimension for attention (reduced)
+WINDOW_PATTERN = "L"     # sliding window pattern: use full context only for MPS
 
-# Optimization
-TOTAL_BATCH_SIZE = 2**19 # ~524K tokens per optimizer step
-EMBEDDING_LR = 0.6      # learning rate for token embeddings (Adam)
-UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
-MATRIX_LR = 0.04        # learning rate for matrix parameters (Muon)
-SCALAR_LR = 0.5         # learning rate for per-layer scalars (Adam)
-WEIGHT_DECAY = 0.2      # cautious weight decay for Muon
+# Optimization - Adjusted for smaller models
+TOTAL_BATCH_SIZE = 2**16 # ~65K tokens per optimizer step (adjusted for MPS)
+EMBEDDING_LR = 0.3      # learning rate for token embeddings (Adam) - reduced
+UNEMBEDDING_LR = 0.002  # learning rate for lm_head (Adam) - reduced
+MATRIX_LR = 0.02        # learning rate for matrix parameters (Muon) - reduced
+SCALAR_LR = 0.25        # learning rate for per-layer scalars (Adam) - reduced
+WEIGHT_DECAY = 0.1      # cautious weight decay for Muon - reduced
 ADAM_BETAS = (0.8, 0.95) # Adam beta1, beta2
-WARMUP_RATIO = 0.0      # fraction of time budget for LR warmup
-WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
+WARMUP_RATIO = 0.1      # fraction of time budget for LR warmup
+WARMDOWN_RATIO = 0.3    # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
-# Model size
-DEPTH = 8               # number of transformer layers
-DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
+# Model size - Significantly reduced for MPS
+DEPTH = 4               # number of transformer layers (reduced from 8)
+DEVICE_BATCH_SIZE = 32   # per-device batch size (reduced for MPS)
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -456,11 +490,12 @@ DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
 
 t_start = time.time()
 torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-torch.set_float32_matmul_precision("high")
-device = torch.device("cuda")
-autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
-H100_BF16_PEAK_FLOPS = 989.5e12
+# Use MPS for macOS
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+print(f"Using device: {device}")
+autocast_ctx = torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16)
+# Estimate MPS performance (adjust based on your Mac's GPU)
+MPS_PEAK_FLOPS = 5.0e12  # Conservative estimate for M1/M2 GPU
 
 tokenizer = Tokenizer.from_directory()
 vocab_size = tokenizer.get_vocab_size()
@@ -505,7 +540,8 @@ optimizer = model.setup_optimizer(
     weight_decay=WEIGHT_DECAY,
 )
 
-model = torch.compile(model, dynamic=False)
+# Disable torch.compile for MPS compatibility
+# model = torch.compile(model, dynamic=False)
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
@@ -541,7 +577,6 @@ total_training_time = 0
 step = 0
 
 while True:
-    torch.cuda.synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         with autocast_ctx:
@@ -571,7 +606,6 @@ while True:
         print("FAIL")
         exit(1)
 
-    torch.cuda.synchronize()
     t1 = time.time()
     dt = t1 - t0
 
@@ -584,7 +618,7 @@ while True:
     debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1))
     pct_done = 100 * progress
     tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
-    mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
+    mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / MPS_PEAK_FLOPS
     remaining = max(0, TIME_BUDGET - total_training_time)
 
     print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
@@ -615,14 +649,12 @@ with autocast_ctx:
 # Final summary
 t_end = time.time()
 startup_time = t_start_training - t_start
-steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) / total_training_time / H100_BF16_PEAK_FLOPS if total_training_time > 0 else 0
-peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
+steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) / total_training_time / MPS_PEAK_FLOPS if total_training_time > 0 else 0
 
 print("---")
 print(f"val_bpb:          {val_bpb:.6f}")
 print(f"training_seconds: {total_training_time:.1f}")
 print(f"total_seconds:    {t_end - t_start:.1f}")
-print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
 print(f"mfu_percent:      {steady_state_mfu:.2f}")
 print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
 print(f"num_steps:        {step}")

@@ -13,6 +13,8 @@ import os
 import sys
 import time
 import math
+import threading
+import queue as queue_mod
 import argparse
 import pickle
 from multiprocessing import Pool
@@ -273,7 +275,7 @@ def _document_batches(split, tokenizer_batch_size=128):
         epoch += 1
 
 
-def make_dataloader(tokenizer, B, T, split, buffer_size=1000):
+def make_dataloader(tokenizer, B, T, split, buffer_size=1000, device=None):
     """
     BOS-aligned dataloader with best-fit packing.
     Every row starts with BOS. Documents packed using best-fit to minimize cropping.
@@ -295,8 +297,26 @@ def make_dataloader(tokenizer, B, T, split, buffer_size=1000):
 
     # Pre-allocate buffers: [inputs (B*T) | targets (B*T)]
     row_buffer = torch.empty((B, row_capacity), dtype=torch.long)
-    cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=True)
-    gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device="cuda")
+    
+    # Only use pin_memory for CUDA devices
+    if torch.cuda.is_available():
+        cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=True)
+    else:
+        cpu_buffer = torch.empty(2 * B * T, dtype=torch.long)
+    
+    # Set device for GPU buffer
+    if device is None:
+        # Auto-detect device
+        if torch.cuda.is_available():
+            device_name = "cuda"
+        elif torch.backends.mps.is_available():
+            device_name = "mps"
+        else:
+            device_name = "cpu"
+    else:
+        device_name = device
+    
+    gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device=device_name)
     cpu_inputs = cpu_buffer[:B * T].view(B, T)
     cpu_targets = cpu_buffer[B * T:].view(B, T)
     inputs = gpu_buffer[:B * T].view(B, T)
@@ -336,6 +356,37 @@ def make_dataloader(tokenizer, B, T, split, buffer_size=1000):
         gpu_buffer.copy_(cpu_buffer, non_blocking=True)
         yield inputs, targets, epoch
 
+
+def make_dataloader_prefetch(tokenizer, B, T, split, buffer_size=1000, device=None, prefetch_depth=2):
+    """
+    Wraps make_dataloader with a background thread that pre-packs batches,
+    so GPU doesn't stall waiting on CPU tokenization/packing.
+    prefetch_depth controls how many batches are buffered ahead.
+    """
+    base_loader = make_dataloader(tokenizer, B, T, split, buffer_size=buffer_size, device=device)
+    q = queue_mod.Queue(maxsize=prefetch_depth)
+    sentinel = object()
+
+    def _producer():
+        try:
+            for batch in base_loader:
+                q.put(batch)
+        except Exception as e:
+            q.put(e)
+        finally:
+            q.put(sentinel)
+
+    thread = threading.Thread(target=_producer, daemon=True)
+    thread.start()
+
+    while True:
+        item = q.get()
+        if item is sentinel:
+            break
+        if isinstance(item, Exception):
+            raise item
+        yield item
+
 # ---------------------------------------------------------------------------
 # Evaluation (DO NOT CHANGE — this is the fixed metric)
 # ---------------------------------------------------------------------------
@@ -349,12 +400,24 @@ def evaluate_bpb(model, tokenizer, batch_size):
     are excluded from both sums.
     Uses fixed MAX_SEQ_LEN so results are comparable across configs.
     """
-    token_bytes = get_token_bytes(device="cuda")
-    val_loader = make_dataloader(tokenizer, batch_size, MAX_SEQ_LEN, "val")
+    # Auto-detect available device
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+
+    token_bytes = get_token_bytes(device=device)
+    val_loader = make_dataloader(tokenizer, batch_size, MAX_SEQ_LEN, "val", device=device)
     steps = EVAL_TOKENS // (batch_size * MAX_SEQ_LEN)
+    # Safety guard: cap at 10x expected steps to prevent infinite loop
+    max_steps = max(steps * 10, 1000)
     total_nats = 0.0
     total_bytes = 0
-    for _ in range(steps):
+    for i in range(steps):
+        if i >= max_steps:
+            break
         x, y, _ = next(val_loader)
         loss_flat = model(x, y, reduction='none').view(-1)
         y_flat = y.view(-1)
@@ -362,6 +425,8 @@ def evaluate_bpb(model, tokenizer, batch_size):
         mask = nbytes > 0
         total_nats += (loss_flat * mask).sum().item()
         total_bytes += nbytes.sum().item()
+    if total_bytes == 0:
+        return float('inf')
     return total_nats / (math.log(2) * total_bytes)
 
 # ---------------------------------------------------------------------------

@@ -63,6 +63,8 @@ uv run train.py
 
 On an M4 with 32 GB unified memory, treat these as starting points for bring-up rather than final research settings.
 
+For a dedicated macOS walkthrough, see [MACOS_TESTING.md](./MACOS_TESTING.md).
+
 ## Running the agent
 
 Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:

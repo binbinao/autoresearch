@@ -11,6 +11,7 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 import gc
 import math
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, asdict
 
 import torch
@@ -29,6 +30,25 @@ else:
     fa3 = None
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, make_dataloader_prefetch, evaluate_bpb
+
+OOM_EXCEPTIONS = tuple(
+    exc for exc in {
+        getattr(torch, "OutOfMemoryError", None),
+        getattr(torch.cuda, "OutOfMemoryError", None),
+    } if exc is not None
+)
+
+
+def compile_if_cuda(**kwargs):
+    def decorator(fn):
+        return torch.compile(fn, **kwargs) if torch.cuda.is_available() else fn
+    return decorator
+
+
+def get_autocast_context(device):
+    if device.type == "cuda":
+        return torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return nullcontext()
 
 # ---------------------------------------------------------------------------
 # GPT Model
@@ -335,7 +355,7 @@ polar_express_coeffs = [
     (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
 ]
 
-@torch.compile(dynamic=False, fullgraph=True)
+@compile_if_cuda(dynamic=False, fullgraph=True)
 def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
     p.mul_(1 - lr_t * wd_t)
     exp_avg.lerp_(grad, 1 - beta1_t)
@@ -346,7 +366,7 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
     step_size = lr_t / bias1
     p.add_(exp_avg / denom, alpha=-step_size)
 
-@torch.compile(dynamic=False, fullgraph=True)
+@compile_if_cuda(dynamic=False, fullgraph=True)
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
                     momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
     # Nesterov momentum
@@ -354,7 +374,8 @@ def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momen
     momentum_buffer.lerp_(stacked_grads, 1 - momentum)
     g = stacked_grads.lerp_(momentum_buffer, momentum)
     # Polar express orthogonalization
-    X = g.bfloat16()
+    orth_dtype = torch.bfloat16 if g.device.type == "cuda" else torch.float32
+    X = g.to(dtype=orth_dtype)
     X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-6)
     if g.size(-2) > g.size(-1):
         for a, b, c in polar_express_coeffs[:ns_steps]:
@@ -516,16 +537,15 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.cuda.manual_seed(42)
         device = torch.device("cuda")
-        autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
         H100_BF16_PEAK_FLOPS = 989.5e12
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
-        autocast_ctx = torch.amp.autocast(device_type="cpu", dtype=torch.float32)  # MPS doesn't support bf16, use float32
         H100_BF16_PEAK_FLOPS = 20.0e12  # Approximate M2/M3 performance
     else:
         device = torch.device("cpu")
-        autocast_ctx = torch.amp.autocast(device_type="cpu", dtype=torch.float32)  # CPU also uses float32
         H100_BF16_PEAK_FLOPS = 1.0e12  # Approximate CPU performance
+
+    autocast_ctx = get_autocast_context(device)
 
     torch.set_float32_matmul_precision("high")
 
@@ -572,7 +592,8 @@ if __name__ == "__main__":
         weight_decay=WEIGHT_DECAY,
     )
 
-    model = torch.compile(model, dynamic=False)
+    if device.type == "cuda":
+        model = torch.compile(model, dynamic=False)
 
     train_loader = make_dataloader_prefetch(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train", device=device.type)
     x, y, epoch = next(train_loader)  # prefetch first batch
@@ -621,7 +642,7 @@ if __name__ == "__main__":
                 loss = loss / grad_accum_steps
                 loss.backward()
                 x, y, epoch = next(train_loader)
-        except torch.cuda.OutOfMemoryError:
+        except OOM_EXCEPTIONS:
             print(f"\nOOM at step {step} during forward/backward pass.")
             print("---")
             print(f"val_bpb:          0.000000")
@@ -650,7 +671,7 @@ if __name__ == "__main__":
 
         try:
             optimizer.step()
-        except torch.cuda.OutOfMemoryError:
+        except OOM_EXCEPTIONS:
             print(f"\nOOM at step {step} during optimizer step.")
             print("---")
             print(f"val_bpb:          0.000000")

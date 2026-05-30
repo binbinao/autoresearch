@@ -12,10 +12,17 @@ import os
 import sys
 import argparse
 import time
+from contextlib import nullcontext
 
 import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
+
+
+def get_autocast_context(device):
+    if device.type == "cuda":
+        return torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return nullcontext()
 
 
 def detect_device():
@@ -110,12 +117,7 @@ def test_model(tokenizer, device):
     loader = make_dataloader(tokenizer, 4, 128, "train", device=device.type)
     x, y, _ = next(loader)
 
-    if torch.cuda.is_available():
-        ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
-    elif torch.backends.mps.is_available():
-        ctx = torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16)
-    else:
-        ctx = torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16)
+    ctx = get_autocast_context(device)
 
     with torch.no_grad(), ctx:
         loss = model(x, y)
@@ -156,12 +158,7 @@ def test_training_step(tokenizer, device):
     loader = make_dataloader(tokenizer, 4, 128, "train", device=device.type)
     x, y, _ = next(loader)
 
-    if torch.cuda.is_available():
-        ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
-    elif torch.backends.mps.is_available():
-        ctx = torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16)
-    else:
-        ctx = torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16)
+    ctx = get_autocast_context(device)
 
     t0 = time.time()
     with ctx:

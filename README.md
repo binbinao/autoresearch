@@ -39,6 +39,30 @@ uv run train.py
 
 If the above commands all work ok, your setup is working and you can go into autonomous research mode.
 
+For Apple Silicon smoke tests, start with a much smaller configuration so MPS can finish a validation run without exhausting unified memory:
+
+```bash
+AR_MAX_SEQ_LEN=512 \
+AR_EVAL_TOKENS=262144 \
+AR_TIME_BUDGET=60 \
+AR_DEPTH=4 \
+AR_WINDOW_PATTERN=L \
+AR_DEVICE_BATCH_SIZE=8 \
+AR_TOTAL_BATCH_SIZE=16384 \
+uv run test_setup.py --quick
+
+AR_MAX_SEQ_LEN=512 \
+AR_EVAL_TOKENS=262144 \
+AR_TIME_BUDGET=60 \
+AR_DEPTH=4 \
+AR_WINDOW_PATTERN=L \
+AR_DEVICE_BATCH_SIZE=8 \
+AR_TOTAL_BATCH_SIZE=16384 \
+uv run train.py
+```
+
+On an M4 with 32 GB unified memory, treat these as starting points for bring-up rather than final research settings.
+
 ## Running the agent
 
 Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:

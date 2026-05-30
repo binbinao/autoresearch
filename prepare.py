@@ -25,13 +25,18 @@ import rustbpe
 import tiktoken
 import torch
 
+
+def get_env_int(name, default):
+    value = os.environ.get(name)
+    return int(value) if value is not None else default
+
 # ---------------------------------------------------------------------------
 # Constants (fixed, do not modify)
 # ---------------------------------------------------------------------------
 
-MAX_SEQ_LEN = 2048       # context length
-TIME_BUDGET = 300        # training time budget in seconds (5 minutes)
-EVAL_TOKENS = 40 * 524288  # number of tokens for val eval
+MAX_SEQ_LEN = get_env_int("AR_MAX_SEQ_LEN", 2048)       # context length
+TIME_BUDGET = get_env_int("AR_TIME_BUDGET", 300)        # training time budget in seconds (5 minutes)
+EVAL_TOKENS = get_env_int("AR_EVAL_TOKENS", 40 * 524288)  # number of tokens for val eval
 
 # ---------------------------------------------------------------------------
 # Configuration

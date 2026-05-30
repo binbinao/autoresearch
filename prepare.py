@@ -326,6 +326,7 @@ def make_dataloader(tokenizer, B, T, split, buffer_size=1000, device=None):
     cpu_targets = cpu_buffer[B * T:].view(B, T)
     inputs = gpu_buffer[:B * T].view(B, T)
     targets = gpu_buffer[B * T:].view(B, T)
+    reuse_device_buffer = device_name == "cuda"
 
     while True:
         for row_idx in range(B):
@@ -358,8 +359,11 @@ def make_dataloader(tokenizer, B, T, split, buffer_size=1000, device=None):
 
         cpu_inputs.copy_(row_buffer[:, :-1])
         cpu_targets.copy_(row_buffer[:, 1:])
-        gpu_buffer.copy_(cpu_buffer, non_blocking=True)
-        yield inputs, targets, epoch
+        if reuse_device_buffer:
+            gpu_buffer.copy_(cpu_buffer, non_blocking=True)
+            yield inputs, targets, epoch
+        else:
+            yield cpu_inputs.to(device_name), cpu_targets.to(device_name), epoch
 
 
 def make_dataloader_prefetch(tokenizer, B, T, split, buffer_size=1000, device=None, prefetch_depth=2):

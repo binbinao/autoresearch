@@ -51,6 +51,12 @@ def get_autocast_context(device):
     return nullcontext()
 
 
+def scalar_like(value, ref):
+    if torch.is_tensor(value):
+        return value.to(dtype=ref.dtype, device=ref.device)
+    return torch.tensor(value, dtype=ref.dtype, device=ref.device)
+
+
 def get_env_int(name, default):
     value = os.environ.get(name)
     return int(value) if value is not None else default
@@ -398,7 +404,7 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
                     momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
     # Nesterov momentum
-    momentum = momentum_t.to(stacked_grads.dtype)
+    momentum = scalar_like(momentum_t, stacked_grads)
     momentum_buffer.lerp_(stacked_grads, 1 - momentum)
     g = stacked_grads.lerp_(momentum_buffer, momentum)
     # Polar express orthogonalization
@@ -417,7 +423,7 @@ def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momen
             X = a * X + B @ X
     g = X
     # NorMuon variance reduction
-    beta2 = beta2_t.to(g.dtype)
+    beta2 = scalar_like(beta2_t, g)
     v_mean = g.float().square().mean(dim=red_dim, keepdim=True)
     red_dim_size = g.size(red_dim)
     v_norm_sq = v_mean.sum(dim=(-2, -1), keepdim=True) * red_dim_size
@@ -429,8 +435,8 @@ def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momen
     final_scale = step_size * (v_norm / v_norm_new.clamp_min(1e-10))
     g = g * final_scale.to(g.dtype)
     # Cautious weight decay + parameter update
-    lr = lr_t.to(g.dtype)
-    wd = wd_t.to(g.dtype)
+    lr = scalar_like(lr_t, g)
+    wd = scalar_like(wd_t, g)
     mask = (g * stacked_params) >= 0
     stacked_params.sub_(lr * g + lr * wd * stacked_params * mask)
 
@@ -463,15 +469,28 @@ class MuonAdamW(torch.optim.Optimizer):
                 state['exp_avg'] = torch.zeros_like(p)
                 state['exp_avg_sq'] = torch.zeros_like(p)
             state['step'] += 1
-            self._adamw_step_t.fill_(state['step'])
-            self._adamw_lr_t.fill_(group['lr'])
-            self._adamw_beta1_t.fill_(group['betas'][0])
-            self._adamw_beta2_t.fill_(group['betas'][1])
-            self._adamw_eps_t.fill_(group['eps'])
-            self._adamw_wd_t.fill_(group['weight_decay'])
+            if p.device.type == "cuda":
+                self._adamw_step_t.fill_(state['step'])
+                self._adamw_lr_t.fill_(group['lr'])
+                self._adamw_beta1_t.fill_(group['betas'][0])
+                self._adamw_beta2_t.fill_(group['betas'][1])
+                self._adamw_eps_t.fill_(group['eps'])
+                self._adamw_wd_t.fill_(group['weight_decay'])
+                step_t = self._adamw_step_t
+                lr_t = self._adamw_lr_t
+                beta1_t = self._adamw_beta1_t
+                beta2_t = self._adamw_beta2_t
+                eps_t = self._adamw_eps_t
+                wd_t = self._adamw_wd_t
+            else:
+                step_t = state['step']
+                lr_t = group['lr']
+                beta1_t = group['betas'][0]
+                beta2_t = group['betas'][1]
+                eps_t = group['eps']
+                wd_t = group['weight_decay']
             adamw_step_fused(p, grad, state['exp_avg'], state['exp_avg_sq'],
-                            self._adamw_step_t, self._adamw_lr_t, self._adamw_beta1_t,
-                            self._adamw_beta2_t, self._adamw_eps_t, self._adamw_wd_t)
+                            step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t)
 
     def _step_muon(self, group):
         params = group['params']
@@ -497,14 +516,23 @@ class MuonAdamW(torch.optim.Optimizer):
         for i, param in enumerate(params):
             stacked_grads[i].copy_(param.grad)
             stacked_params[i].copy_(param.data)
-        self._muon_momentum_t.fill_(group["momentum"])
-        self._muon_beta2_t.fill_(group["beta2"] if group["beta2"] is not None else 0.0)
-        self._muon_lr_t.fill_(group["lr"] * max(1.0, shape[-2] / shape[-1])**0.5)
-        self._muon_wd_t.fill_(group["weight_decay"])
+        if p.device.type == "cuda":
+            self._muon_momentum_t.fill_(group["momentum"])
+            self._muon_beta2_t.fill_(group["beta2"] if group["beta2"] is not None else 0.0)
+            self._muon_lr_t.fill_(group["lr"] * max(1.0, shape[-2] / shape[-1])**0.5)
+            self._muon_wd_t.fill_(group["weight_decay"])
+            momentum_t = self._muon_momentum_t
+            lr_t = self._muon_lr_t
+            wd_t = self._muon_wd_t
+            beta2_t = self._muon_beta2_t
+        else:
+            momentum_t = group["momentum"]
+            lr_t = group["lr"] * max(1.0, shape[-2] / shape[-1])**0.5
+            wd_t = group["weight_decay"]
+            beta2_t = group["beta2"] if group["beta2"] is not None else 0.0
         muon_step_fused(stacked_grads, stacked_params,
                         state["momentum_buffer"], state["second_momentum_buffer"],
-                        self._muon_momentum_t, self._muon_lr_t, self._muon_wd_t,
-                        self._muon_beta2_t, group["ns_steps"], red_dim)
+                        momentum_t, lr_t, wd_t, beta2_t, group["ns_steps"], red_dim)
         # Write back updated params directly (avoids unbind + list allocation)
         for i, param in enumerate(params):
             param.data.copy_(stacked_params[i])

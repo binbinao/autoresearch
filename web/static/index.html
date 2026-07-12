@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light" />
+  <meta name="theme-color" content="#eef1f4" />
+  <title>AutoResearch</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <a class="skip" href="#workbench">跳到工作台</a>
+
+  <header class="topbar">
+    <div class="brand-block">
+      <p class="brand" translate="no">AutoResearch</p>
+      <p class="tagline">本地实验循环控制台</p>
+    </div>
+    <div class="top-metric" aria-live="polite">
+      <span>最佳 val_bpb</span>
+      <strong id="best-bpb">—</strong>
+    </div>
+    <button type="button" class="btn ghost" id="btn-refresh">刷新</button>
+  </header>
+
+  <section class="status-bar" aria-label="运行状态">
+    <div><span>状态</span><strong id="st-state">—</strong></div>
+    <div><span>分支</span><strong id="st-branch">—</strong></div>
+    <div><span>设备</span><strong id="st-device">—</strong></div>
+    <div><span>数据</span><strong id="st-data">—</strong></div>
+    <p class="msg" id="st-message">—</p>
+  </section>
+
+  <main id="workbench" class="workbench">
+    <section class="stage" aria-labelledby="run-heading">
+      <div class="stage-head">
+        <h1 id="run-heading">实验循环</h1>
+        <ol class="states" id="loop-states" aria-label="循环阶段">
+          <li data-state="idle">Idle</li>
+          <li data-state="preparing">Prepare</li>
+          <li data-state="running">Running</li>
+          <li data-state="deciding">Decide</li>
+          <li data-state="error">Error</li>
+        </ol>
+      </div>
+
+      <div class="run-row">
+        <label class="field grow">
+          <span>这次试什么</span>
+          <input id="run-desc" name="run-desc" autocomplete="off" spellcheck="false" placeholder="例如：把 MATRIX_LR 调到 0.05…" />
+        </label>
+        <div class="run-actions">
+          <button type="button" class="btn primary" id="btn-run">启动训练</button>
+          <button type="button" class="btn" id="btn-demo">演示</button>
+          <button type="button" class="btn danger" id="btn-stop">停止</button>
+        </div>
+      </div>
+
+      <div class="metrics" id="last-metrics" hidden>
+        <div><span>val_bpb</span><strong id="m-bpb">—</strong></div>
+        <div><span>VRAM</span><strong id="m-vram">—</strong></div>
+        <div><span>steps</span><strong id="m-steps">—</strong></div>
+        <div><span>device</span><strong id="m-device">—</strong></div>
+      </div>
+
+      <div class="charts" id="charts">
+        <div class="chart-block">
+          <div class="chart-head">
+            <h2>本轮收敛</h2>
+            <p id="live-progress-label">等待 step / loss…</p>
+          </div>
+          <div class="progress-track" aria-hidden="true">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+          <canvas id="chart-loss" width="900" height="240" role="img" aria-label="训练 loss 曲线"></canvas>
+        </div>
+        <div class="chart-block">
+          <div class="chart-head">
+            <h2>历史 val_bpb</h2>
+            <p>越低越好</p>
+          </div>
+          <canvas id="chart-history" width="900" height="240" role="img" aria-label="历史 val_bpb 曲线"></canvas>
+        </div>
+      </div>
+
+      <div class="decide-row" id="decide-row" hidden>
+        <p class="decide-hint">训练已结束，选择是否保留这次改动</p>
+        <div class="run-actions">
+          <button type="button" class="btn keep" id="btn-keep">保留</button>
+          <button type="button" class="btn danger" id="btn-discard">丢弃</button>
+          <button type="button" class="btn ghost" id="btn-crash">记为 crash</button>
+        </div>
+      </div>
+
+      <details class="fold">
+        <summary>日志</summary>
+        <pre class="log" id="log" aria-live="polite"></pre>
+        <div class="checkpoints">
+          <h3>Checkpoints</h3>
+          <ul id="checkpoint-list"></ul>
+        </div>
+      </details>
+    </section>
+
+    <aside class="side" aria-label="设置与历史">
+      <details class="fold" id="setup" open>
+        <summary>准备</summary>
+        <div class="fold-body">
+          <label class="field">
+            <span>Run tag</span>
+            <input id="run-tag" name="run-tag" autocomplete="off" spellcheck="false" placeholder="jul12…" />
+          </label>
+          <div class="run-actions stack">
+            <button type="button" class="btn" id="btn-branch">切换分支</button>
+            <button type="button" class="btn" id="btn-prepare">准备数据</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="fold">
+        <summary>研究指引</summary>
+        <div class="fold-body">
+          <textarea id="program-editor" name="program" spellcheck="false" rows="10" aria-label="program.md"></textarea>
+          <button type="button" class="btn primary" id="btn-save-program">保存指引</button>
+        </div>
+      </details>
+
+      <details class="fold">
+        <summary>实验旋钮</summary>
+        <div class="fold-body">
+          <div class="chips" role="group" aria-label="预设">
+            <button type="button" class="chip" data-preset="gpu_default">GPU</button>
+            <button type="button" class="chip" data-preset="macos_small">macOS</button>
+            <button type="button" class="chip" data-preset="cpu_tiny">CPU</button>
+          </div>
+          <div class="knobs" id="knobs">
+            <label><span>DEPTH</span><input data-env="AR_DEPTH" name="AR_DEPTH" inputmode="numeric" placeholder="层数…" autocomplete="off" /></label>
+            <label><span>BATCH</span><input data-env="AR_DEVICE_BATCH_SIZE" name="AR_DEVICE_BATCH_SIZE" inputmode="numeric" placeholder="batch…" autocomplete="off" /></label>
+            <label><span>TOTAL</span><input data-env="AR_TOTAL_BATCH_SIZE" name="AR_TOTAL_BATCH_SIZE" inputmode="numeric" placeholder="tokens…" autocomplete="off" /></label>
+            <label><span>MATRIX_LR</span><input data-env="AR_MATRIX_LR" name="AR_MATRIX_LR" inputmode="decimal" placeholder="0.04…" autocomplete="off" /></label>
+            <label><span>WINDOW</span><input data-env="AR_WINDOW_PATTERN" name="AR_WINDOW_PATTERN" placeholder="SSSL…" autocomplete="off" /></label>
+            <label><span>BUDGET</span><input data-env="AR_TIME_BUDGET" name="AR_TIME_BUDGET" inputmode="numeric" placeholder="300…" autocomplete="off" /></label>
+          </div>
+          <button type="button" class="btn" id="btn-apply-env">应用旋钮</button>
+        </div>
+      </details>
+
+      <details class="fold" open>
+        <summary>结果表</summary>
+        <div class="fold-body table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>commit</th>
+                <th>val_bpb</th>
+                <th>mem</th>
+                <th>status</th>
+                <th>desc</th>
+              </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+          </table>
+        </div>
+      </details>
+    </aside>
+  </main>
+
+  <footer>
+    <p>本地控制台 · 不替代 Agent 自主改码 · 帮你把实验循环跑通</p>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

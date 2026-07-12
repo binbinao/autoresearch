@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AutoResearch Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,400;0,500;1,400&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+
+  <header class="hero">
+    <p class="brand">AutoResearch</p>
+    <h1>把一夜实验循环，放进浏览器。</h1>
+    <p class="lede">准备数据 · 设定想法 · 跑 5 分钟训练 · 看 val_bpb · 保留或丢弃。小白也能跟着 Loop 前进。</p>
+    <div class="hero-actions">
+      <button type="button" class="btn primary" id="btn-scroll-setup">开始设置</button>
+      <button type="button" class="btn ghost" id="btn-refresh">刷新状态</button>
+    </div>
+    <div class="hero-metric" id="hero-metric">
+      <span class="label">当前最佳 val_bpb</span>
+      <strong id="best-bpb">—</strong>
+    </div>
+  </header>
+
+  <main>
+    <section id="setup" class="panel">
+      <div class="section-head">
+        <h2>01 · 环境与分支</h2>
+        <p>先确认数据与分支，再进循环。</p>
+      </div>
+      <div class="status-grid" id="status-grid">
+        <div><span>状态</span><strong id="st-state">—</strong></div>
+        <div><span>分支</span><strong id="st-branch">—</strong></div>
+        <div><span>设备</span><strong id="st-device">—</strong></div>
+        <div><span>数据</span><strong id="st-data">—</strong></div>
+      </div>
+      <p class="msg" id="st-message">—</p>
+      <div class="row">
+        <label class="field">
+          <span>Run tag</span>
+          <input id="run-tag" placeholder="例如 jul12" />
+        </label>
+        <button type="button" class="btn" id="btn-branch">创建 / 切换分支</button>
+        <button type="button" class="btn" id="btn-prepare">准备数据 (prepare.py)</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>02 · 研究指引</h2>
+        <p>这是给「研究者」看的说明（program.md）。你可以改措辞来引导方向。</p>
+      </div>
+      <textarea id="program-editor" spellcheck="false" rows="12"></textarea>
+      <div class="row">
+        <button type="button" class="btn primary" id="btn-save-program">保存指引</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>03 · 实验旋钮</h2>
+        <p>通过环境变量覆盖超参，不必手改 train.py。不确定就选预设。</p>
+      </div>
+      <div class="row wrap">
+        <button type="button" class="chip" data-preset="gpu_default">GPU 默认</button>
+        <button type="button" class="chip" data-preset="macos_small">macOS 小配置</button>
+        <button type="button" class="chip" data-preset="cpu_tiny">CPU 迷你冒烟</button>
+      </div>
+      <div class="knobs" id="knobs">
+        <label><span>AR_DEPTH</span><input data-env="AR_DEPTH" placeholder="层数" /></label>
+        <label><span>AR_DEVICE_BATCH_SIZE</span><input data-env="AR_DEVICE_BATCH_SIZE" placeholder="batch" /></label>
+        <label><span>AR_TOTAL_BATCH_SIZE</span><input data-env="AR_TOTAL_BATCH_SIZE" placeholder="tokens/step" /></label>
+        <label><span>AR_MATRIX_LR</span><input data-env="AR_MATRIX_LR" placeholder="0.04" /></label>
+        <label><span>AR_WINDOW_PATTERN</span><input data-env="AR_WINDOW_PATTERN" placeholder="SSSL / L" /></label>
+        <label><span>AR_TIME_BUDGET</span><input data-env="AR_TIME_BUDGET" placeholder="秒，默认 300" /></label>
+      </div>
+      <div class="row">
+        <button type="button" class="btn" id="btn-apply-env">应用旋钮</button>
+      </div>
+    </section>
+
+    <section class="panel loop-panel">
+      <div class="section-head">
+        <h2>04 · 实验循环</h2>
+        <p>Loop Engineering：明确状态、可观测日志、可停止、跑完再决定保留或丢弃。</p>
+      </div>
+      <div class="loop-rail">
+        <ol class="states" id="loop-states">
+          <li data-state="idle">Idle</li>
+          <li data-state="preparing">Prepare</li>
+          <li data-state="running">Running</li>
+          <li data-state="deciding">Decide</li>
+          <li data-state="error">Error</li>
+        </ol>
+      </div>
+      <div class="row">
+        <label class="field grow">
+          <span>这次实验在试什么？</span>
+          <input id="run-desc" placeholder="例如：提高 MATRIX_LR 到 0.05" />
+        </label>
+        <button type="button" class="btn primary" id="btn-run">启动训练</button>
+        <button type="button" class="btn ghost" id="btn-demo">演示一轮（不训练）</button>
+        <button type="button" class="btn danger" id="btn-stop">停止</button>
+      </div>
+      <div class="metrics" id="last-metrics" hidden>
+        <div><span>val_bpb</span><strong id="m-bpb">—</strong></div>
+        <div><span>VRAM MB</span><strong id="m-vram">—</strong></div>
+        <div><span>steps</span><strong id="m-steps">—</strong></div>
+        <div><span>device</span><strong id="m-device">—</strong></div>
+      </div>
+      <div class="row decide-row" id="decide-row" hidden>
+        <button type="button" class="btn keep" id="btn-keep">保留 (keep)</button>
+        <button type="button" class="btn danger" id="btn-discard">丢弃 (discard)</button>
+        <button type="button" class="btn ghost" id="btn-crash">记为 crash</button>
+      </div>
+      <pre class="log" id="log" aria-live="polite"></pre>
+      <div class="checkpoints">
+        <h3>Checkpoints</h3>
+        <ul id="checkpoint-list"></ul>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>05 · 历史结果</h2>
+        <p>来自 results.tsv（不进 git）。越低的 val_bpb 越好。</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>commit</th>
+              <th>val_bpb</th>
+              <th>mem GB</th>
+              <th>status</th>
+              <th>description</th>
+            </tr>
+          </thead>
+          <tbody id="results-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>本地控制台 · 不替代 AI Agent 自主研究 · 帮你把 <code>program.md</code> 循环跑起来</p>
+  </footer>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

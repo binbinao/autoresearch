@@ -37,6 +37,17 @@ uv run prepare.py
 uv run train.py
 ```
 
+### Beginner web console (optional)
+
+Prefer a browser UI over the terminal? Install the UI extra and open the local console:
+
+```bash
+uv sync --extra ui
+uv run --extra ui python -m web.app
+```
+
+Then visit http://127.0.0.1:8765 — see [`web/README.md`](./web/README.md).
+
 If the above commands all work ok, your setup is working and you can go into autonomous research mode.
 
 For Apple Silicon smoke tests, start with a much smaller configuration so MPS can finish a validation run without exhausting unified memory:

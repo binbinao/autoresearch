@@ -96,6 +96,210 @@ function renderMetrics(last) {
   decide.hidden = !["deciding", "error"].includes(window.__state);
 }
 
+function chartColors() {
+  return {
+    axis: "rgba(93, 107, 117, 0.55)",
+    grid: "rgba(21, 32, 40, 0.06)",
+    text: "#5d6b75",
+    lime: "#0f7a72",
+    keep: "#1f8f6a",
+    discard: "#c0452e",
+    line: "rgba(15, 122, 114, 0.95)",
+    fill: "rgba(15, 122, 114, 0.10)",
+  };
+}
+
+function fitCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || canvas.width;
+  const cssH = Math.max(220, Math.round(cssW * 0.32));
+  canvas.width = Math.floor(cssW * dpr);
+  canvas.height = Math.floor(cssH * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w: cssW, h: cssH };
+}
+
+function drawEmpty(ctx, w, h, message) {
+  const c = chartColors();
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = c.text;
+  ctx.font = "12px IBM Plex Mono, monospace";
+  ctx.fillText(message, 16, h / 2);
+}
+
+function drawAxes(ctx, pad, w, h, c) {
+  ctx.strokeStyle = c.grid;
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i += 1) {
+    const y = pad.t + ((h - pad.t - pad.b) * i) / 4;
+    ctx.beginPath();
+    ctx.moveTo(pad.l, y);
+    ctx.lineTo(w - pad.r, y);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = c.axis;
+  ctx.beginPath();
+  ctx.moveTo(pad.l, pad.t);
+  ctx.lineTo(pad.l, h - pad.b);
+  ctx.lineTo(w - pad.r, h - pad.b);
+  ctx.stroke();
+}
+
+function renderLossChart(series) {
+  const canvas = $("#chart-loss");
+  const { ctx, w, h } = fitCanvas(canvas);
+  const c = chartColors();
+  const points = series || [];
+  if (!points.length) {
+    drawEmpty(ctx, w, h, "尚无本轮 loss — 启动训练或点「演示」");
+    $("#progress-fill").style.width = "0%";
+    $("#live-progress-label").textContent = "等待 step / loss 日志…";
+    return;
+  }
+
+  const pad = { t: 18, r: 18, b: 34, l: 52 };
+  const xs = points.map((p) => p.step);
+  const ys = points.map((p) => p.loss);
+  const minX = xs[0];
+  const maxX = xs[xs.length - 1] === minX ? minX + 1 : xs[xs.length - 1];
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const spanY = maxY - minY || 1;
+  const y0 = minY - spanY * 0.08;
+  const y1 = maxY + spanY * 0.08;
+
+  const xMap = (x) => pad.l + ((x - minX) / (maxX - minX)) * (w - pad.l - pad.r);
+  const yMap = (y) => pad.t + (1 - (y - y0) / (y1 - y0)) * (h - pad.t - pad.b);
+
+  ctx.clearRect(0, 0, w, h);
+  drawAxes(ctx, pad, w, h, c);
+
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const x = xMap(p.step);
+    const y = yMap(p.loss);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = c.line;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // area fill
+  ctx.lineTo(xMap(points[points.length - 1].step), h - pad.b);
+  ctx.lineTo(xMap(points[0].step), h - pad.b);
+  ctx.closePath();
+  ctx.fillStyle = c.fill;
+  ctx.fill();
+
+  ctx.fillStyle = c.text;
+  ctx.font = "11px IBM Plex Mono, monospace";
+  ctx.fillText(y1.toFixed(3), 8, pad.t + 4);
+  ctx.fillText(y0.toFixed(3), 8, h - pad.b);
+  ctx.fillText(`step ${minX}`, pad.l, h - 10);
+  ctx.fillText(`step ${maxX}`, w - pad.r - 64, h - 10);
+
+  const latest = points[points.length - 1];
+  const pct = Math.max(0, Math.min(100, Number(latest.pct) || 0));
+  $("#progress-fill").style.width = `${pct}%`;
+  const tok = latest.tok_per_sec != null ? ` · ${latest.tok_per_sec.toLocaleString()} tok/s` : "";
+  $("#live-progress-label").textContent =
+    `step ${latest.step} · ${pct.toFixed(1)}% · loss ${Number(latest.loss).toFixed(4)}${tok}`;
+}
+
+function renderHistoryChart(rows) {
+  const canvas = $("#chart-history");
+  const { ctx, w, h } = fitCanvas(canvas);
+  const c = chartColors();
+  const parsed = (rows || [])
+    .map((row, idx) => {
+      const val = Number(row.val_bpb);
+      if (!Number.isFinite(val) || val <= 0) return null;
+      return { i: idx, val, status: row.status || "", desc: row.description || "" };
+    })
+    .filter(Boolean);
+
+  if (!parsed.length) {
+    drawEmpty(ctx, w, h, "尚无历史 val_bpb — 完成几轮实验后这里会画出趋势");
+    return;
+  }
+
+  const pad = { t: 18, r: 18, b: 34, l: 52 };
+  const minX = 0;
+  const maxX = Math.max(parsed.length - 1, 1);
+  const vals = parsed.map((p) => p.val);
+  const minY = Math.min(...vals);
+  const maxY = Math.max(...vals);
+  const spanY = maxY - minY || 1;
+  const y0 = minY - spanY * 0.12;
+  const y1 = maxY + spanY * 0.12;
+  const xMap = (i) => pad.l + (i / maxX) * (w - pad.l - pad.r);
+  const yMap = (y) => pad.t + (1 - (y - y0) / (y1 - y0)) * (h - pad.t - pad.b);
+
+  ctx.clearRect(0, 0, w, h);
+  drawAxes(ctx, pad, w, h, c);
+
+  // best line
+  let best = Infinity;
+  const bestPts = parsed.map((p) => {
+    best = Math.min(best, p.val);
+    return best;
+  });
+  ctx.beginPath();
+  bestPts.forEach((v, i) => {
+    const x = xMap(i);
+    const y = yMap(v);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.setLineDash([5, 4]);
+  ctx.strokeStyle = "rgba(31, 143, 106, 0.65)";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.beginPath();
+  parsed.forEach((p, i) => {
+    const x = xMap(i);
+    const y = yMap(p.val);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = "rgba(21, 32, 40, 0.35)";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  parsed.forEach((p, i) => {
+    const x = xMap(i);
+    const y = yMap(p.val);
+    const keep = p.status === "keep";
+    ctx.beginPath();
+    ctx.arc(x, y, keep ? 4.5 : 3.5, 0, Math.PI * 2);
+    if (keep) {
+      ctx.fillStyle = c.keep;
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = p.status === "crash" ? c.discard : "rgba(192, 69, 46, 0.75)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  });
+
+  ctx.fillStyle = c.text;
+  ctx.font = "11px IBM Plex Mono, monospace";
+  ctx.fillText(y1.toFixed(4), 6, pad.t + 4);
+  ctx.fillText(y0.toFixed(4), 6, h - pad.b);
+  ctx.fillText("exp #1", pad.l, h - 10);
+  ctx.fillText(`#${parsed.length}`, w - pad.r - 28, h - 10);
+  ctx.fillText(`best ${best.toFixed(4)}`, w - pad.r - 110, pad.t + 4);
+}
+
+function renderCharts(status) {
+  renderLossChart(status.progress_series || []);
+  renderHistoryChart(status.history || []);
+}
+
 function appendLogLines(lines) {
   if (!lines || !lines.length) return;
   const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 24;
@@ -118,6 +322,7 @@ async function refresh() {
   renderResults(s.history || []);
   fillEnvInputs(s.env_overrides || {});
   renderMetrics(s.last_result);
+  renderCharts(s);
 
   if ((s.log_lines || []).length > knownLogCount) {
     appendLogLines(s.log_lines.slice(knownLogCount));
@@ -150,10 +355,6 @@ function todayTag() {
 }
 
 $("#run-tag").value = todayTag();
-
-$("#btn-scroll-setup").addEventListener("click", () => {
-  $("#setup").scrollIntoView({ behavior: "smooth" });
-});
 
 $("#btn-refresh").addEventListener("click", async () => {
   try {
@@ -295,8 +496,11 @@ async function boot() {
     $("#program-editor").value = prog.content || "";
     await refresh();
     pollTimer = setInterval(() => {
-      if (["running", "preparing"].includes(window.__state)) refresh().catch(() => {});
-    }, 2500);
+      if (["running", "preparing", "deciding"].includes(window.__state)) refresh().catch(() => {});
+    }, 1200);
+    window.addEventListener("resize", () => {
+      refresh().catch(() => {});
+    });
   } catch (e) {
     toast(`无法连接后端：${e.message}`);
   }

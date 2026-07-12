@@ -1,6 +1,6 @@
 """Smoke checks for loop engine helpers."""
 
-from web.loop_engine import parse_metrics
+from web.loop_engine import parse_metrics, parse_progress_text, synthesize_demo_progress
 
 
 def test_parse_metrics_ok():
@@ -31,7 +31,28 @@ def test_parse_metrics_crash():
     assert result.val_bpb is None
 
 
+def test_parse_progress_cr_log():
+    text = (
+        "\rstep 00000 (0.0%) | loss: 5.100000 | lrm: 1.00 | dt: 10ms | tok/sec: 1,000 | mfu: 10.0% | epoch: 0 | remaining: 300s"
+        "\rstep 00001 (1.0%) | loss: 4.800000 | lrm: 1.00 | dt: 10ms | tok/sec: 1,100 | mfu: 11.0% | epoch: 0 | remaining: 290s"
+        "\rstep 00002 (2.0%) | loss: 4.500000 | lrm: 1.00 | dt: 10ms | tok/sec: 1,200 | mfu: 12.0% | epoch: 0 | remaining: 280s"
+    )
+    points = parse_progress_text(text)
+    assert len(points) == 3
+    assert points[0]["step"] == 0
+    assert abs(points[2]["loss"] - 4.5) < 1e-6
+    assert points[2]["tok_per_sec"] == 1200
+
+
+def test_demo_progress_converges():
+    points = synthesize_demo_progress(20)
+    assert len(points) == 20
+    assert points[0]["loss"] > points[-1]["loss"]
+
+
 if __name__ == "__main__":
     test_parse_metrics_ok()
     test_parse_metrics_crash()
+    test_parse_progress_cr_log()
+    test_demo_progress_converges()
     print("ok")

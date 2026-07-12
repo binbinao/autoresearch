@@ -44,6 +44,14 @@ METRIC_RE = re.compile(
     re.MULTILINE,
 )
 
+# train.py prints progress with carriage returns: "\rstep 00012 (4.0%) | loss: 3.21 | ..."
+PROGRESS_RE = re.compile(
+    r"step\s+(\d+)\s+\(([0-9.]+)%\)\s*\|\s*loss:\s*([0-9.eE+-]+)"
+    r"(?:\s*\|\s*lrm:\s*([0-9.eE+-]+))?"
+    r"(?:.*?\|\s*tok/sec:\s*([0-9,]+))?"
+    r"(?:.*?\|\s*mfu:\s*([0-9.]+)%)?",
+)
+
 
 @dataclass
 class ExperimentResult:
@@ -116,6 +124,56 @@ def parse_metrics(text: str) -> ExperimentResult:
     if result.val_bpb is None or result.val_bpb <= 0:
         result.crashed = True
     return result
+
+
+def parse_progress_line(line: str) -> dict[str, Any] | None:
+    match = PROGRESS_RE.search(line)
+    if not match:
+        return None
+    tok = match.group(5)
+    return {
+        "step": int(match.group(1)),
+        "pct": float(match.group(2)),
+        "loss": float(match.group(3)),
+        "lrm": float(match.group(4)) if match.group(4) else None,
+        "tok_per_sec": int(tok.replace(",", "")) if tok else None,
+        "mfu": float(match.group(6)) if match.group(6) else None,
+    }
+
+
+def parse_progress_text(text: str) -> list[dict[str, Any]]:
+    """Extract unique progress points (last write wins per step)."""
+    by_step: dict[int, dict[str, Any]] = {}
+    for match in PROGRESS_RE.finditer(text):
+        tok = match.group(5)
+        point = {
+            "step": int(match.group(1)),
+            "pct": float(match.group(2)),
+            "loss": float(match.group(3)),
+            "lrm": float(match.group(4)) if match.group(4) else None,
+            "tok_per_sec": int(tok.replace(",", "")) if tok else None,
+            "mfu": float(match.group(6)) if match.group(6) else None,
+        }
+        by_step[point["step"]] = point
+    return [by_step[k] for k in sorted(by_step)]
+
+
+def synthesize_demo_progress(n: int = 40) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    for i in range(n):
+        # Smooth exponential-ish decay for teaching "convergence"
+        loss = 4.2 * (0.92 ** i) + 0.85 + (0.03 if i % 7 == 0 else 0.0)
+        points.append(
+            {
+                "step": i,
+                "pct": round(100.0 * (i + 1) / n, 1),
+                "loss": round(loss, 6),
+                "lrm": 1.0 if i < n * 0.5 else max(0.0, 1.0 - (i - n * 0.5) / (n * 0.5)),
+                "tok_per_sec": 12000 + i * 30,
+                "mfu": 18.0,
+            }
+        )
+    return points
 
 
 def read_results_tsv() -> list[dict[str, str]]:
@@ -250,6 +308,7 @@ class ExperimentLoop:
         self._proc: subprocess.Popen[str] | None = None
         self._log_thread: threading.Thread | None = None
         self._log_lines: list[str] = []
+        self._progress_series: list[dict[str, Any]] = []
         self._log_cond = threading.Condition()
         self.refresh_static()
 
@@ -260,6 +319,39 @@ class ExperimentLoop:
             self.snap.history = rows
             self.snap.best_val_bpb = best_val_bpb_from_rows(rows)
 
+    def _reset_live_buffers(self) -> None:
+        with self._log_cond:
+            self._log_lines = []
+            self._progress_series = []
+            self._log_cond.notify_all()
+
+    def _ingest_log_line(self, line: str) -> None:
+        clean = line.rstrip("\n")
+        if not clean:
+            return
+        point = parse_progress_line(clean)
+        with self._log_cond:
+            self._log_lines.append(clean)
+            if len(self._log_lines) > 5000:
+                self._log_lines = self._log_lines[-3000:]
+            if point is not None:
+                if self._progress_series and self._progress_series[-1]["step"] == point["step"]:
+                    self._progress_series[-1] = point
+                else:
+                    self._progress_series.append(point)
+                if len(self._progress_series) > 4000:
+                    self._progress_series = self._progress_series[-2500:]
+            self._log_cond.notify_all()
+
+    def _reload_progress_from_log(self) -> None:
+        if not RUN_LOG.exists():
+            return
+        text = RUN_LOG.read_text(encoding="utf-8", errors="replace")
+        points = parse_progress_text(text)
+        with self._log_cond:
+            if points:
+                self._progress_series = points
+
     def checkpoint(self, message: str) -> None:
         with self.lock:
             self.snap.message = message
@@ -268,13 +360,21 @@ class ExperimentLoop:
 
     def status(self) -> dict[str, Any]:
         self.refresh_static()
+        if self.snap.state == LoopState.RUNNING:
+            self._reload_progress_from_log()
         with self.lock:
             payload = self.snap.to_dict()
+        with self._log_cond:
+            series = list(self._progress_series)
+            logs = list(self._log_lines[-200:])
         payload["data_ready"] = data_ready()
         payload["device"] = detect_device()
         payload["program_exists"] = PROGRAM_MD.exists()
         payload["results_count"] = len(payload["history"])
-        payload["log_lines"] = list(self._log_lines[-200:])
+        payload["log_lines"] = logs
+        payload["progress_series"] = series
+        latest = series[-1] if series else None
+        payload["live_progress"] = latest
         payload["presets"] = {k: dict(v) for k, v in PRESETS.items()}
         return payload
 
@@ -312,6 +412,7 @@ class ExperimentLoop:
                 raise RuntimeError("已有任务在运行")
             self.snap.state = LoopState.PREPARING
             self.snap.error = None
+        self._reset_live_buffers()
         self.checkpoint("开始准备数据与 tokenizer…")
         self._spawn(["uv", "run", "prepare.py"], kind="prepare")
 
@@ -326,8 +427,7 @@ class ExperimentLoop:
             self.snap.last_result = None
             self.snap.run_started_at = time.time()
         RUN_LOG.write_text("", encoding="utf-8")
-        with self._log_cond:
-            self._log_lines = []
+        self._reset_live_buffers()
         self.checkpoint(f"启动训练实验：{description}")
         self._spawn(["uv", "run", "train.py"], kind="train", redirect_log=True)
 
@@ -355,10 +455,13 @@ class ExperimentLoop:
             )
             self.snap.state = LoopState.DECIDING
             self.snap.error = None
+            series = synthesize_demo_progress()
             with self._log_cond:
+                self._progress_series = series
                 self._log_lines = [
                     "[demo] 这是演示模式，没有真正启动 train.py。",
                     f"[demo] 合成 val_bpb={demo_bpb:.6f}",
+                    f"[demo] 已生成 {len(series)} 个 loss 采样点，便于观察收敛曲线。",
                     "[demo] 请练习「保留 / 丢弃」，熟悉实验循环。",
                 ]
                 self._log_cond.notify_all()
@@ -468,40 +571,49 @@ class ExperimentLoop:
             self._proc = proc
             self.snap.run_pid = proc.pid
 
+        def flush_buffer(buf: str) -> str:
+            # train.py uses \\r progress updates; split on both \\r and \\n
+            while True:
+                idx_n = buf.find("\n")
+                idx_r = buf.find("\r")
+                candidates = [i for i in (idx_n, idx_r) if i >= 0]
+                if not candidates:
+                    return buf
+                cut = min(candidates)
+                piece = buf[:cut]
+                buf = buf[cut + 1 :]
+                if piece:
+                    self._ingest_log_line(piece)
+            return buf
+
         def pump() -> None:
             try:
                 if redirect_log:
-                    # Tail the log file while process runs
-                    with RUN_LOG.open("r", encoding="utf-8", errors="replace") as f:
+                    with RUN_LOG.open("r", encoding="utf-8", errors="replace", newline="") as f:
+                        buf = ""
                         while True:
-                            line = f.readline()
-                            if line:
-                                with self._log_cond:
-                                    self._log_lines.append(line.rstrip("\n"))
-                                    if len(self._log_lines) > 5000:
-                                        self._log_lines = self._log_lines[-3000:]
-                                    self._log_cond.notify_all()
+                            chunk = f.read(2048)
+                            if chunk:
+                                buf += chunk
+                                buf = flush_buffer(buf)
                             elif proc.poll() is not None:
-                                # drain remainder
                                 rest = f.read()
                                 if rest:
-                                    for part in rest.splitlines():
-                                        with self._log_cond:
-                                            self._log_lines.append(part)
-                                            self._log_cond.notify_all()
+                                    buf += rest
+                                buf = flush_buffer(buf)
+                                if buf.strip():
+                                    self._ingest_log_line(buf)
                                 break
                             else:
-                                time.sleep(0.2)
+                                time.sleep(0.15)
                 else:
                     assert proc.stdout is not None
                     for line in proc.stdout:
-                        with self._log_cond:
-                            self._log_lines.append(line.rstrip("\n"))
-                            if len(self._log_lines) > 5000:
-                                self._log_lines = self._log_lines[-3000:]
-                            self._log_cond.notify_all()
+                        self._ingest_log_line(line)
             finally:
                 code = proc.wait()
+                if kind == "train":
+                    self._reload_progress_from_log()
                 self._on_process_exit(kind, code)
 
         self._log_thread = threading.Thread(target=pump, name=f"loop-{kind}", daemon=True)

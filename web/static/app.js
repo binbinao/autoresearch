@@ -5,6 +5,206 @@ const logEl = $("#log");
 let pollTimer = null;
 let logSource = null;
 let knownLogCount = 0;
+let programLang = "zh";
+let programPlatform = "gpu";
+let programSnapshot = "";
+let programMode = "preview";
+let activePreset = null;
+let runtimeEnv = null;
+let envManualLock = localStorage.getItem("ar_env_manual") === "1";
+
+const PROGRAM_FILE = {
+  gpu: { en: "program.md", zh: "program_zh.md" },
+  macos: { en: "program_macos.md", zh: "program_macos_zh.md" },
+  cpu: { en: "program_cpu.md", zh: "program_cpu_zh.md" },
+};
+
+const PRESET_TO_PLATFORM = {
+  gpu_default: "gpu",
+  macos_small: "macos",
+  cpu_tiny: "cpu",
+};
+
+const PLATFORM_TO_PRESET = {
+  gpu: "gpu_default",
+  macos: "macos_small",
+  cpu: "cpu_tiny",
+};
+
+const PLATFORM_LABEL = {
+  gpu: "GPU",
+  macos: "macOS",
+  cpu: "CPU",
+};
+
+function programFileName(platform = programPlatform, lang = programLang) {
+  return (PROGRAM_FILE[platform] || PROGRAM_FILE.gpu)[lang] || PROGRAM_FILE.gpu.en;
+}
+
+function preferredProgramLang() {
+  const saved = localStorage.getItem("ar_program_lang");
+  if (saved === "en" || saved === "zh") return saved;
+  return (navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+function setEnvManualLock(locked) {
+  envManualLock = Boolean(locked);
+  if (envManualLock) localStorage.setItem("ar_env_manual", "1");
+  else localStorage.removeItem("ar_env_manual");
+  const autoBtn = $("#btn-env-auto");
+  if (autoBtn) autoBtn.classList.toggle("active", !envManualLock && Boolean(runtimeEnv));
+}
+
+function setEnvSenseState(state, { title = "", detail = "", device = "" } = {}) {
+  const panel = $("#env-sense");
+  if (!panel) return;
+  panel.dataset.state = state;
+  panel.hidden = state === "ok" || state === "idle";
+  panel.classList.toggle("is-error", state === "error");
+  panel.classList.toggle("is-detecting", state === "detecting");
+
+  const labelEl = $("#env-sense-label");
+  const deviceEl = $("#env-sense-device");
+  const reasonEl = $("#env-sense-reason");
+  const kicker = $("#env-sense-kicker");
+  if (labelEl) labelEl.textContent = title || (state === "detecting" ? "检测中…" : "");
+  if (deviceEl) deviceEl.textContent = device;
+  if (reasonEl) reasonEl.textContent = detail;
+  if (kicker) kicker.textContent = state === "error" ? "环境检测失败" : "本机环境";
+}
+
+function updateEnvSenseUI() {
+  const autoBtn = $("#btn-env-auto");
+  if (autoBtn) autoBtn.classList.toggle("active", !envManualLock && Boolean(runtimeEnv));
+  // Success: keep banner hidden. Errors stay visible until retry succeeds.
+  if ($("#env-sense")?.dataset.state === "error") return;
+  if (runtimeEnv) setEnvSenseState("ok");
+}
+
+async function applyDetectedEnvironment({ force = false, syncGuide = true } = {}) {
+  if (envManualLock && !force) {
+    updateEnvSenseUI();
+    return null;
+  }
+  setEnvSenseState("detecting", {
+    title: "检测中…",
+    detail: "正在识别：NVIDIA GPU / macOS / CPU…",
+  });
+  try {
+    const res = await api("/api/env/auto", { method: "POST", body: "{}" });
+    runtimeEnv = res.runtime_env || res;
+    const platform = runtimeEnv?.platform || res.platform;
+    const preset = res.preset || runtimeEnv?.recommended_preset;
+    // Only three valid outcomes — anything else is a real API bug.
+    if (!platform || !["gpu", "macos", "cpu"].includes(platform)) {
+      throw new Error(`环境分类异常：${platform || "空"}（应为 gpu / macos / cpu）`);
+    }
+    fillEnvInputs(res.overrides || {});
+    setPresetButtons(preset || PLATFORM_TO_PRESET[platform]);
+    if (syncGuide) {
+      if (platform !== programPlatform) {
+        await loadProgram(programLang, platform, { force: true });
+      } else {
+        programPlatform = platform;
+        localStorage.setItem("ar_program_platform", programPlatform);
+        setPlatformButtons(programPlatform);
+      }
+    }
+    if (force) setEnvManualLock(false);
+    setEnvSenseState("ok");
+    updateEnvSenseUI();
+    return { ...res, platform, preset: preset || PLATFORM_TO_PRESET[platform] };
+  } catch (err) {
+    setEnvSenseState("error", {
+      title: "环境检测请求失败",
+      detail: err?.message || String(err),
+    });
+    throw err;
+  }
+}
+
+function setLangButtons(lang) {
+  $$(".lang-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.lang === lang);
+  });
+  updateProgramFileLabel();
+}
+
+function setPlatformButtons(platform) {
+  $$(".platform-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.platform === platform);
+  });
+  updateProgramFileLabel();
+}
+
+function setPresetButtons(presetName) {
+  activePreset = presetName || null;
+  $$("[data-preset]").forEach((btn) => {
+    const on = btn.dataset.preset === activePreset;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
+function updateProgramFileLabel() {
+  const label = $("#program-file-label");
+  if (label) label.textContent = programFileName();
+}
+
+function setProgramMode(mode) {
+  programMode = mode === "edit" ? "edit" : "preview";
+  const editing = programMode === "edit";
+  $$(".mode-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.mode === programMode);
+  });
+  $("#program-preview").hidden = editing;
+  $("#program-editor").hidden = !editing;
+  $("#program-edit-actions").hidden = !editing;
+  if (!editing) renderProgramPreview($("#program-editor").value);
+}
+
+function renderProgramPreview(markdown) {
+  const preview = $("#program-preview");
+  if (!preview) return;
+  const parseMd =
+    typeof marked !== "undefined" && typeof (marked.parse || marked) === "function"
+      ? marked.parse || marked
+      : null;
+  if (!parseMd || typeof DOMPurify === "undefined") {
+    preview.textContent = markdown || "";
+    return;
+  }
+  const raw = parseMd(markdown || "");
+  const clean = DOMPurify.sanitize(String(raw), {
+    USE_PROFILES: { html: true },
+  });
+  const doc = new DOMParser().parseFromString(clean, "text/html");
+  preview.replaceChildren(...Array.from(doc.body.childNodes));
+}
+
+async function loadProgram(lang, platform, { force = false } = {}) {
+  const nextLang = lang || programLang;
+  const nextPlatform = platform || programPlatform;
+  const editor = $("#program-editor");
+  if (!force && editor.value !== programSnapshot) {
+    const ok = window.confirm("当前指引有未保存修改，切换将丢弃这些修改。继续？");
+    if (!ok) return false;
+  }
+  const prog = await api(
+    `/api/program?lang=${encodeURIComponent(nextLang)}&platform=${encodeURIComponent(nextPlatform)}`
+  );
+  programLang = prog.lang || nextLang;
+  programPlatform = prog.platform || nextPlatform;
+  editor.value = prog.content || "";
+  programSnapshot = editor.value;
+  localStorage.setItem("ar_program_lang", programLang);
+  localStorage.setItem("ar_program_platform", programPlatform);
+  setLangButtons(programLang);
+  setPlatformButtons(programPlatform);
+  renderProgramPreview(editor.value);
+  setProgramMode("preview");
+  return true;
+}
 
 function toast(msg) {
   const el = $("#toast");
@@ -81,6 +281,17 @@ function collectEnv() {
   return overrides;
 }
 
+function enhanceKnobTooltips() {
+  $$("#knobs .knob-hint").forEach((el) => {
+    const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+    if (text) el.title = text;
+  });
+  $$("#knobs .knob-name code").forEach((el) => {
+    const text = (el.textContent || "").trim();
+    if (text) el.title = text;
+  });
+}
+
 function renderMetrics(last) {
   const box = $("#last-metrics");
   const decide = $("#decide-row");
@@ -111,8 +322,11 @@ function chartColors() {
 
 function fitCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
-  const cssW = canvas.clientWidth || canvas.width;
-  const cssH = Math.max(220, Math.round(cssW * 0.32));
+  const cssW = Math.max(1, canvas.clientWidth || canvas.width || 320);
+  const cssH = Math.max(
+    280,
+    canvas.clientHeight || Math.round(cssW * 0.42)
+  );
   canvas.width = Math.floor(cssW * dpr);
   canvas.height = Math.floor(cssH * dpr);
   const ctx = canvas.getContext("2d");
@@ -317,6 +531,17 @@ async function refresh() {
   $("#st-data").textContent = s.data_ready ? "就绪" : "未准备";
   $("#st-message").textContent = s.message || "";
   $("#best-bpb").textContent = s.best_val_bpb != null ? Number(s.best_val_bpb).toFixed(6) : "—";
+  if (s.runtime_env) {
+    runtimeEnv = s.runtime_env;
+    if ($("#env-sense")?.dataset.state !== "error") {
+      setEnvSenseState("ok");
+    }
+    updateEnvSenseUI();
+  }
+  if (s.active_preset) setPresetButtons(s.active_preset);
+  else if (!activePreset && s.detected_platform) {
+    setPresetButtons(PLATFORM_TO_PRESET[s.detected_platform]);
+  }
   setLoopState(s.state);
   renderCheckpoints(s.checkpoints || []);
   renderResults(s.history || []);
@@ -365,6 +590,28 @@ $("#btn-refresh").addEventListener("click", async () => {
   }
 });
 
+$("#btn-env-setup").addEventListener("click", async () => {
+  try {
+    knownLogCount = 0;
+    logEl.textContent = "";
+    const res = await api("/api/env-setup", { method: "POST", body: "{}" });
+    startLogStream();
+    fillEnvInputs(
+      (await api("/api/status")).env_overrides || {}
+    );
+    if (res.platform) {
+      setPresetButtons(res.preset || PLATFORM_TO_PRESET[res.platform]);
+      if (res.platform !== programPlatform) {
+        await loadProgram(programLang, res.platform, { force: true });
+      }
+    }
+    toast(`开始环境准备（${res.label || res.platform || "本机"}）…`);
+    await refresh();
+  } catch (e) {
+    toast(e.message);
+  }
+});
+
 $("#btn-branch").addEventListener("click", async () => {
   try {
     const tag = $("#run-tag").value.trim();
@@ -391,14 +638,82 @@ $("#btn-prepare").addEventListener("click", async () => {
 
 $("#btn-save-program").addEventListener("click", async () => {
   try {
-    await api("/api/program", {
+    const res = await api("/api/program", {
       method: "PUT",
-      body: JSON.stringify({ content: $("#program-editor").value }),
+      body: JSON.stringify({
+        content: $("#program-editor").value,
+        lang: programLang,
+        platform: programPlatform,
+      }),
     });
-    toast("program.md 已保存");
+    programSnapshot = $("#program-editor").value;
+    renderProgramPreview(programSnapshot);
+    setProgramMode("preview");
+    toast(`${res.path || programFileName()} 已保存`);
   } catch (e) {
     toast(e.message);
   }
+});
+
+$("#btn-cancel-edit").addEventListener("click", () => {
+  $("#program-editor").value = programSnapshot;
+  setProgramMode("preview");
+});
+
+$$(".mode-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const mode = btn.dataset.mode;
+    if (!mode || mode === programMode) return;
+    if (mode === "preview" && $("#program-editor").value !== programSnapshot) {
+      const ok = window.confirm("放弃未保存的编辑并返回预览？");
+      if (!ok) return;
+      $("#program-editor").value = programSnapshot;
+    }
+    setProgramMode(mode);
+  });
+});
+
+$$(".lang-btn").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const next = btn.dataset.lang;
+    if (!next || next === programLang) return;
+    try {
+      const ok = await loadProgram(next, programPlatform);
+      if (!ok) setLangButtons(programLang);
+      else toast(next === "zh" ? "已切换到中文指引" : "Switched to English guidance");
+    } catch (e) {
+      setLangButtons(programLang);
+      toast(e.message);
+    }
+  });
+});
+
+$$(".platform-btn").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const next = btn.dataset.platform;
+    if (!next || next === programPlatform) return;
+    try {
+      const ok = await loadProgram(programLang, next);
+      if (!ok) {
+        setPlatformButtons(programPlatform);
+        return;
+      }
+      setEnvManualLock(true);
+      const preset = PLATFORM_TO_PRESET[next];
+      if (preset) {
+        const res = await api("/api/preset", {
+          method: "POST",
+          body: JSON.stringify({ name: preset }),
+        });
+        fillEnvInputs(res.overrides || {});
+        setPresetButtons(preset);
+      }
+      toast(`已手动切换到 ${PLATFORM_LABEL[next] || next} 指引与预设`);
+    } catch (e) {
+      setPlatformButtons(programPlatform);
+      toast(e.message);
+    }
+  });
 });
 
 $$("[data-preset]").forEach((btn) => {
@@ -409,11 +724,42 @@ $$("[data-preset]").forEach((btn) => {
         body: JSON.stringify({ name: btn.dataset.preset }),
       });
       fillEnvInputs(res.overrides || {});
-      toast(`已应用预设 ${btn.dataset.preset}`);
+      setEnvManualLock(true);
+      setPresetButtons(btn.dataset.preset);
+      const nextPlatform = res.platform || PRESET_TO_PLATFORM[btn.dataset.preset];
+      if (nextPlatform && nextPlatform !== programPlatform) {
+        const ok = await loadProgram(programLang, nextPlatform);
+        if (ok) toast(`已手动应用 ${PLATFORM_LABEL[nextPlatform]} 预设与指引`);
+        else toast(`已应用预设 ${btn.dataset.preset}（指引未切换）`);
+      } else {
+        toast(`已应用预设 ${btn.dataset.preset}`);
+      }
+      updateEnvSenseUI();
     } catch (e) {
       toast(e.message);
     }
   });
+});
+
+$("#btn-env-auto")?.addEventListener("click", async () => {
+  try {
+    await applyDetectedEnvironment({ force: true, syncGuide: true });
+    toast(`已按本机自动选择 ${runtimeEnv?.label || ""} 环境`);
+    await refresh();
+  } catch (e) {
+    toast(`环境检测失败：${e.message}`);
+  }
+});
+
+$("#btn-env-retry")?.addEventListener("click", async () => {
+  try {
+    setEnvManualLock(false);
+    await applyDetectedEnvironment({ force: true, syncGuide: true });
+    toast(`已自动选择 ${runtimeEnv?.label || ""} 环境`);
+    await refresh();
+  } catch (e) {
+    toast(`环境检测失败：${e.message}`);
+  }
 });
 
 $("#btn-apply-env").addEventListener("click", async () => {
@@ -422,7 +768,9 @@ $("#btn-apply-env").addEventListener("click", async () => {
       method: "POST",
       body: JSON.stringify({ overrides: collectEnv() }),
     });
-    toast("旋钮已应用");
+    setEnvManualLock(true);
+    setPresetButtons(null);
+    toast("参数已应用（已切换为手动）");
   } catch (e) {
     toast(e.message);
   }
@@ -491,9 +839,46 @@ $("#btn-discard").addEventListener("click", () => decide("discard"));
 $("#btn-crash").addEventListener("click", () => decide("crash"));
 
 async function boot() {
+  enhanceKnobTooltips();
+  setEnvSenseState("detecting", {
+    title: "检测中…",
+    detail: "正在识别 CUDA / MPS / CPU…",
+  });
   try {
-    const prog = await api("/api/program");
-    $("#program-editor").value = prog.content || "";
+    programLang = preferredProgramLang();
+    setLangButtons(programLang);
+    const status = await api("/api/status");
+    runtimeEnv = status.runtime_env || null;
+    const detected = status.detected_platform || runtimeEnv?.platform || null;
+
+    if (!runtimeEnv && !detected) {
+      throw new Error("后端未返回本机环境信息，请确认服务已重启");
+    }
+
+    if (envManualLock) {
+      const saved = localStorage.getItem("ar_program_platform");
+      programPlatform =
+        saved === "gpu" || saved === "macos" || saved === "cpu"
+          ? saved
+          : detected || "gpu";
+      setPlatformButtons(programPlatform);
+      await loadProgram(programLang, programPlatform, { force: true });
+      setPresetButtons(status.active_preset || PLATFORM_TO_PRESET[programPlatform]);
+      setEnvSenseState("ok");
+      updateEnvSenseUI();
+    } else {
+      try {
+        await applyDetectedEnvironment({ force: true, syncGuide: true });
+        toast(`已自动选择 ${runtimeEnv?.label || PLATFORM_LABEL[detected]} 试验环境`);
+      } catch (envErr) {
+        toast(`环境检测失败：${envErr.message}`);
+        // Fall back to loading a guide so the UI remains usable
+        programPlatform = detected || "cpu";
+        setPlatformButtons(programPlatform);
+        await loadProgram(programLang, programPlatform, { force: true });
+      }
+    }
+
     await refresh();
     pollTimer = setInterval(() => {
       if (["running", "preparing", "deciding"].includes(window.__state)) refresh().catch(() => {});
@@ -502,7 +887,11 @@ async function boot() {
       refresh().catch(() => {});
     });
   } catch (e) {
-    toast(`无法连接后端：${e.message}`);
+    setEnvSenseState("error", {
+      title: "未检测出可用环境",
+      detail: e.message || String(e),
+    });
+    toast(`环境检测失败：${e.message}`);
   }
 }
 

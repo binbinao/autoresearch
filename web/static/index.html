@@ -8,8 +8,11 @@
   <title>AutoResearch</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/app.css" />
+  <script src="/static/vendor/marked.min.js" defer></script>
+  <script src="/static/vendor/purify.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
 </head>
 <body>
   <a class="skip" href="#workbench">跳到工作台</a>
@@ -35,120 +38,273 @@
   </section>
 
   <main id="workbench" class="workbench">
-    <section class="stage" aria-labelledby="run-heading">
-      <div class="stage-head">
-        <h1 id="run-heading">实验循环</h1>
-        <ol class="states" id="loop-states" aria-label="循环阶段">
-          <li data-state="idle">Idle</li>
-          <li data-state="preparing">Prepare</li>
-          <li data-state="running">Running</li>
-          <li data-state="deciding">Decide</li>
-          <li data-state="error">Error</li>
-        </ol>
+    <section class="guide" aria-labelledby="guide-heading">
+      <div class="guide-head">
+        <h1 id="guide-heading">研究指引</h1>
+        <span class="lang-file" id="program-file-label" translate="no">program_zh.md</span>
       </div>
-
-      <div class="run-row">
-        <label class="field grow">
-          <span>这次试什么</span>
-          <input id="run-desc" name="run-desc" autocomplete="off" spellcheck="false" placeholder="例如：把 MATRIX_LR 调到 0.05…" />
-        </label>
-        <div class="run-actions">
-          <button type="button" class="btn primary" id="btn-run">启动训练</button>
-          <button type="button" class="btn" id="btn-demo">演示</button>
-          <button type="button" class="btn danger" id="btn-stop">停止</button>
+      <div class="lang-row">
+        <span class="lang-label">平台</span>
+        <div class="lang-switch" role="group" aria-label="研究指引平台">
+          <button type="button" class="chip platform-btn" data-platform="gpu" id="plat-gpu">GPU</button>
+          <button type="button" class="chip platform-btn" data-platform="macos" id="plat-macos">macOS</button>
+          <button type="button" class="chip platform-btn" data-platform="cpu" id="plat-cpu">CPU</button>
+        </div>
+        <span class="lang-label">语言</span>
+        <div class="lang-switch" role="group" aria-label="研究指引语言">
+          <button type="button" class="chip lang-btn active" data-lang="zh" id="lang-zh">中文</button>
+          <button type="button" class="chip lang-btn" data-lang="en" id="lang-en">English</button>
+        </div>
+        <div class="lang-switch" role="group" aria-label="指引显示模式">
+          <button type="button" class="chip mode-btn active" data-mode="preview" id="mode-preview">预览</button>
+          <button type="button" class="chip mode-btn" data-mode="edit" id="mode-edit">编辑</button>
         </div>
       </div>
-
-      <div class="metrics" id="last-metrics" hidden>
-        <div><span>val_bpb</span><strong id="m-bpb">—</strong></div>
-        <div><span>VRAM</span><strong id="m-vram">—</strong></div>
-        <div><span>steps</span><strong id="m-steps">—</strong></div>
-        <div><span>device</span><strong id="m-device">—</strong></div>
+      <article id="program-preview" class="md-preview" aria-label="研究指引预览"></article>
+      <textarea id="program-editor" name="program" spellcheck="false" rows="18" aria-label="研究指引原文" hidden></textarea>
+      <div class="run-actions" id="program-edit-actions" hidden>
+        <button type="button" class="btn primary" id="btn-save-program">保存指引</button>
+        <button type="button" class="btn ghost" id="btn-cancel-edit">取消</button>
       </div>
-
-      <div class="charts" id="charts">
-        <div class="chart-block">
-          <div class="chart-head">
-            <h2>本轮收敛</h2>
-            <p id="live-progress-label">等待 step / loss…</p>
-          </div>
-          <div class="progress-track" aria-hidden="true">
-            <div class="progress-fill" id="progress-fill"></div>
-          </div>
-          <canvas id="chart-loss" width="900" height="240" role="img" aria-label="训练 loss 曲线"></canvas>
-        </div>
-        <div class="chart-block">
-          <div class="chart-head">
-            <h2>历史 val_bpb</h2>
-            <p>越低越好</p>
-          </div>
-          <canvas id="chart-history" width="900" height="240" role="img" aria-label="历史 val_bpb 曲线"></canvas>
-        </div>
-      </div>
-
-      <div class="decide-row" id="decide-row" hidden>
-        <p class="decide-hint">训练已结束，选择是否保留这次改动</p>
-        <div class="run-actions">
-          <button type="button" class="btn keep" id="btn-keep">保留</button>
-          <button type="button" class="btn danger" id="btn-discard">丢弃</button>
-          <button type="button" class="btn ghost" id="btn-crash">记为 crash</button>
-        </div>
-      </div>
-
-      <details class="fold">
-        <summary>日志</summary>
-        <pre class="log" id="log" aria-live="polite"></pre>
-        <div class="checkpoints">
-          <h3>Checkpoints</h3>
-          <ul id="checkpoint-list"></ul>
-        </div>
-      </details>
     </section>
 
-    <aside class="side" aria-label="设置与历史">
+    <div class="ops">
       <details class="fold" id="setup" open>
-        <summary>准备</summary>
+        <summary>准备工作</summary>
         <div class="fold-body">
-          <label class="field">
-            <span>Run tag</span>
-            <input id="run-tag" name="run-tag" autocomplete="off" spellcheck="false" placeholder="jul12…" />
-          </label>
-          <div class="run-actions stack">
-            <button type="button" class="btn" id="btn-branch">切换分支</button>
-            <button type="button" class="btn" id="btn-prepare">准备数据</button>
+          <div class="setup-body">
+            <label class="field">
+              <span>Run tag</span>
+              <input id="run-tag" name="run-tag" autocomplete="off" spellcheck="false" placeholder="jul12…" aria-describedby="run-tag-hint" />
+            </label>
+            <div class="run-actions">
+              <button type="button" class="btn" id="btn-env-setup" aria-describedby="env-setup-hint">环境准备</button>
+              <button type="button" class="btn" id="btn-branch" aria-describedby="branch-hint">切换分支</button>
+              <button type="button" class="btn" id="btn-prepare" aria-describedby="prepare-hint">准备数据</button>
+            </div>
           </div>
+          <p class="field-hint" id="run-tag-hint">用来命名本次研究分支 <code>autoresearch/&lt;tag&gt;</code>，把实验提交与主分支隔开，方便保留/丢弃改动、对照历史结果。</p>
+          <ul class="setup-hints" aria-label="准备工作说明">
+            <li id="env-setup-hint"><strong>环境准备</strong>：按当前检测结果（GPU / macOS / CPU）安装依赖并做设备冒烟检查，确认本机能跑通训练栈。</li>
+            <li id="branch-hint"><strong>切换分支</strong>：用上方 Run tag 创建或切到 <code>autoresearch/&lt;tag&gt;</code>；之后的实验提交都落在该分支上，避免污染主分支。</li>
+            <li id="prepare-hint"><strong>准备数据</strong>：运行 <code>prepare.py</code>，下载训练分片并训练 BPE 分词器（约 2 分钟，只需做一次）；完成后数据在 <code>~/.cache/autoresearch/</code>。</li>
+          </ul>
         </div>
       </details>
 
-      <details class="fold">
-        <summary>研究指引</summary>
+      <details class="fold" id="knobs-panel" open>
+        <summary>实验参数</summary>
         <div class="fold-body">
-          <textarea id="program-editor" name="program" spellcheck="false" rows="10" aria-label="program.md"></textarea>
-          <button type="button" class="btn primary" id="btn-save-program">保存指引</button>
-        </div>
-      </details>
-
-      <details class="fold">
-        <summary>实验旋钮</summary>
-        <div class="fold-body">
+          <div class="env-sense" id="env-sense" data-state="detecting" aria-live="polite" hidden>
+            <div class="env-sense-main">
+              <span class="env-sense-kicker" id="env-sense-kicker">本机环境</span>
+              <strong id="env-sense-label">检测中…</strong>
+              <span class="env-sense-device" id="env-sense-device"></span>
+            </div>
+            <p class="env-sense-reason" id="env-sense-reason">正在感知运行设备…</p>
+            <div class="env-sense-actions">
+              <button type="button" class="btn" id="btn-env-retry">重试检测</button>
+            </div>
+          </div>
           <div class="chips" role="group" aria-label="预设">
             <button type="button" class="chip" data-preset="gpu_default">GPU</button>
             <button type="button" class="chip" data-preset="macos_small">macOS</button>
             <button type="button" class="chip" data-preset="cpu_tiny">CPU</button>
+            <button type="button" class="chip ghost-chip" id="btn-env-auto" title="按本机 CUDA / MPS / CPU 自动选择">跟随本机</button>
           </div>
+          <p class="field-hint">下列为 <code>train.py</code> / <code>prepare.py</code> 支持的全部 <code>AR_*</code> 环境变量。一次只改一个再开跑，改完点「应用参数」。</p>
+
           <div class="knobs" id="knobs">
-            <label><span>DEPTH</span><input data-env="AR_DEPTH" name="AR_DEPTH" inputmode="numeric" placeholder="层数…" autocomplete="off" /></label>
-            <label><span>BATCH</span><input data-env="AR_DEVICE_BATCH_SIZE" name="AR_DEVICE_BATCH_SIZE" inputmode="numeric" placeholder="batch…" autocomplete="off" /></label>
-            <label><span>TOTAL</span><input data-env="AR_TOTAL_BATCH_SIZE" name="AR_TOTAL_BATCH_SIZE" inputmode="numeric" placeholder="tokens…" autocomplete="off" /></label>
-            <label><span>MATRIX_LR</span><input data-env="AR_MATRIX_LR" name="AR_MATRIX_LR" inputmode="decimal" placeholder="0.04…" autocomplete="off" /></label>
-            <label><span>WINDOW</span><input data-env="AR_WINDOW_PATTERN" name="AR_WINDOW_PATTERN" placeholder="SSSL…" autocomplete="off" /></label>
-            <label><span>BUDGET</span><input data-env="AR_TIME_BUDGET" name="AR_TIME_BUDGET" inputmode="numeric" placeholder="300…" autocomplete="off" /></label>
+            <h3 class="knob-group-title">规模与训练节奏</h3>
+            <label class="knob">
+              <span class="knob-name">DEPTH <code>AR_DEPTH</code></span>
+              <input data-env="AR_DEPTH" name="AR_DEPTH" inputmode="numeric" placeholder="默认随设备（常见 8）" autocomplete="off" aria-describedby="hint-depth" />
+              <small class="knob-hint" id="hint-depth">模型层数（主复杂度）。越大越强但更慢更吃内存；Mac/CPU 建议 2–4，GPU 可试 8+。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">ASPECT_RATIO <code>AR_ASPECT_RATIO</code></span>
+              <input data-env="AR_ASPECT_RATIO" name="AR_ASPECT_RATIO" inputmode="numeric" placeholder="默认 64" autocomplete="off" aria-describedby="hint-aspect" />
+              <small class="knob-hint" id="hint-aspect">宽度系数：<code>model_dim ≈ DEPTH × ASPECT_RATIO</code>（再对齐到 HEAD_DIM）。调大模型更宽，算力与内存同步上升。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">HEAD_DIM <code>AR_HEAD_DIM</code></span>
+              <input data-env="AR_HEAD_DIM" name="AR_HEAD_DIM" inputmode="numeric" placeholder="默认 128" autocomplete="off" aria-describedby="hint-headdim" />
+              <small class="knob-hint" id="hint-headdim">注意力头维度；同时决定头数 <code>n_head = model_dim / HEAD_DIM</code>。一般保持 128，除非刻意改架构对齐。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">SEQ_LEN <code>AR_MAX_SEQ_LEN</code></span>
+              <input data-env="AR_MAX_SEQ_LEN" name="AR_MAX_SEQ_LEN" inputmode="numeric" placeholder="默认 2048" autocomplete="off" aria-describedby="hint-seq" />
+              <small class="knob-hint" id="hint-seq">上下文长度。越长越好记长程依赖，但激活内存暴涨；Mac/CPU 常用 512/256，并可略增 BATCH 补吞吐。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">BATCH <code>AR_DEVICE_BATCH_SIZE</code></span>
+              <input data-env="AR_DEVICE_BATCH_SIZE" name="AR_DEVICE_BATCH_SIZE" inputmode="numeric" placeholder="默认随设备" autocomplete="off" aria-describedby="hint-batch" />
+              <small class="knob-hint" id="hint-batch">单次前向的样本数。越大通常越快，也更吃内存；OOM / 被系统杀掉时优先降它。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">TOTAL <code>AR_TOTAL_BATCH_SIZE</code></span>
+              <input data-env="AR_TOTAL_BATCH_SIZE" name="AR_TOTAL_BATCH_SIZE" inputmode="numeric" placeholder="默认随设备（宜 2 的幂）" autocomplete="off" aria-describedby="hint-total" />
+              <small class="knob-hint" id="hint-total">一次优化更新累积的 token 数。越大梯度更稳，但每步更久、同样时间内步数更少。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">BUDGET <code>AR_TIME_BUDGET</code></span>
+              <input data-env="AR_TIME_BUDGET" name="AR_TIME_BUDGET" inputmode="numeric" placeholder="默认 300（秒）" autocomplete="off" aria-describedby="hint-budget" />
+              <small class="knob-hint" id="hint-budget">训练挂钟秒数。越长 step 越多；冒烟 30–60，正式常用 300。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">EVAL_TOKENS <code>AR_EVAL_TOKENS</code></span>
+              <input data-env="AR_EVAL_TOKENS" name="AR_EVAL_TOKENS" inputmode="numeric" placeholder="默认约 20M" autocomplete="off" aria-describedby="hint-eval" />
+              <small class="knob-hint" id="hint-eval">验证评估 token 量。越大 <code>val_bpb</code> 更稳但收尾更慢；Mac/CPU 预设会明显缩小。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">WINDOW <code>AR_WINDOW_PATTERN</code></span>
+              <input data-env="AR_WINDOW_PATTERN" name="AR_WINDOW_PATTERN" placeholder="如 L 或 SSSL" autocomplete="off" aria-describedby="hint-window" />
+              <small class="knob-hint" id="hint-window">注意力窗口：<code>L</code>=全上下文，<code>S</code>=短窗（如 <code>SSSL</code>）。Mac/CPU 建议先 <code>L</code>。</small>
+            </label>
+
+            <h3 class="knob-group-title">结构细节</h3>
+            <label class="knob">
+              <span class="knob-name">LOGIT_SOFTCAP <code>AR_LOGIT_SOFTCAP</code></span>
+              <input data-env="AR_LOGIT_SOFTCAP" name="AR_LOGIT_SOFTCAP" inputmode="numeric" placeholder="默认 15" autocomplete="off" aria-describedby="hint-softcap" />
+              <small class="knob-hint" id="hint-softcap">Logit soft-cap 温度，抑制过大 logits。一般保持默认；不稳定时可略调对照。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">VE_GATE <code>AR_VE_GATE_CHANNELS</code></span>
+              <input data-env="AR_VE_GATE_CHANNELS" name="AR_VE_GATE_CHANNELS" inputmode="numeric" placeholder="默认 32" autocomplete="off" aria-describedby="hint-vegate" />
+              <small class="knob-hint" id="hint-vegate">Value Embedding 门控输入通道数。影响 VE 门控表达力，适合进阶结构实验。</small>
+            </label>
+
+            <h3 class="knob-group-title">学习率与正则</h3>
+            <label class="knob">
+              <span class="knob-name">MATRIX_LR <code>AR_MATRIX_LR</code></span>
+              <input data-env="AR_MATRIX_LR" name="AR_MATRIX_LR" inputmode="decimal" placeholder="默认 0.04" autocomplete="off" aria-describedby="hint-matrix-lr" />
+              <small class="knob-hint" id="hint-matrix-lr">Muon 矩阵参数学习率。过大易发散，过小学得慢；结构不动时最常细调。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">EMBEDDING_LR <code>AR_EMBEDDING_LR</code></span>
+              <input data-env="AR_EMBEDDING_LR" name="AR_EMBEDDING_LR" inputmode="decimal" placeholder="默认 0.6" autocomplete="off" aria-describedby="hint-emb-lr" />
+              <small class="knob-hint" id="hint-emb-lr">词嵌入（AdamW）学习率。偏高会让 embedding 更新过猛；可与 MATRIX_LR 分开对照。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">UNEMBEDDING_LR <code>AR_UNEMBEDDING_LR</code></span>
+              <input data-env="AR_UNEMBEDDING_LR" name="AR_UNEMBEDDING_LR" inputmode="decimal" placeholder="默认 0.004" autocomplete="off" aria-describedby="hint-unemb-lr" />
+              <small class="knob-hint" id="hint-unemb-lr">输出头 <code>lm_head</code>（AdamW）学习率。通常远小于 embedding。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">SCALAR_LR <code>AR_SCALAR_LR</code></span>
+              <input data-env="AR_SCALAR_LR" name="AR_SCALAR_LR" inputmode="decimal" placeholder="默认 0.5" autocomplete="off" aria-describedby="hint-scalar-lr" />
+              <small class="knob-hint" id="hint-scalar-lr">逐层标量（residual / x0 等）的 AdamW 学习率。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">WEIGHT_DECAY <code>AR_WEIGHT_DECAY</code></span>
+              <input data-env="AR_WEIGHT_DECAY" name="AR_WEIGHT_DECAY" inputmode="decimal" placeholder="默认 0.2" autocomplete="off" aria-describedby="hint-wd" />
+              <small class="knob-hint" id="hint-wd">Muon 的 cautious weight decay。偏大更抑过拟合，也可能压低拟合速度。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">ADAM_BETA1 <code>AR_ADAM_BETA1</code></span>
+              <input data-env="AR_ADAM_BETA1" name="AR_ADAM_BETA1" inputmode="decimal" placeholder="默认 0.8" autocomplete="off" aria-describedby="hint-beta1" />
+              <small class="knob-hint" id="hint-beta1">AdamW 一阶动量。一般少动。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">ADAM_BETA2 <code>AR_ADAM_BETA2</code></span>
+              <input data-env="AR_ADAM_BETA2" name="AR_ADAM_BETA2" inputmode="decimal" placeholder="默认 0.95" autocomplete="off" aria-describedby="hint-beta2" />
+              <small class="knob-hint" id="hint-beta2">AdamW 二阶动量。短训里改动收益通常不大。</small>
+            </label>
+
+            <h3 class="knob-group-title">学习率日程</h3>
+            <label class="knob">
+              <span class="knob-name">WARMUP_RATIO <code>AR_WARMUP_RATIO</code></span>
+              <input data-env="AR_WARMUP_RATIO" name="AR_WARMUP_RATIO" inputmode="decimal" placeholder="默认 0.0" autocomplete="off" aria-describedby="hint-warmup" />
+              <small class="knob-hint" id="hint-warmup">时间预算中 LR 升温比例。默认 0；起步不稳可试 0.05–0.1。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">WARMDOWN_RATIO <code>AR_WARMDOWN_RATIO</code></span>
+              <input data-env="AR_WARMDOWN_RATIO" name="AR_WARMDOWN_RATIO" inputmode="decimal" placeholder="默认 0.5" autocomplete="off" aria-describedby="hint-warmdown" />
+              <small class="knob-hint" id="hint-warmdown">时间预算末段 LR 降温比例。越大末期学得越慢，有时利于压低最终 val_bpb。</small>
+            </label>
+            <label class="knob">
+              <span class="knob-name">FINAL_LR_FRAC <code>AR_FINAL_LR_FRAC</code></span>
+              <input data-env="AR_FINAL_LR_FRAC" name="AR_FINAL_LR_FRAC" inputmode="decimal" placeholder="默认 0.0" autocomplete="off" aria-describedby="hint-final-lr" />
+              <small class="knob-hint" id="hint-final-lr">降温结束 LR = 初始 LR × 该比例。0 表示收到接近 0。</small>
+            </label>
           </div>
-          <button type="button" class="btn" id="btn-apply-env">应用旋钮</button>
+          <button type="button" class="btn" id="btn-apply-env">应用参数</button>
         </div>
       </details>
 
-      <details class="fold" open>
+      <section class="stage" aria-labelledby="run-heading">
+        <div class="stage-head">
+          <h2 id="run-heading">实验循环</h2>
+          <ol class="states" id="loop-states" aria-label="循环阶段">
+            <li data-state="idle">Idle</li>
+            <li data-state="preparing">Prepare</li>
+            <li data-state="running">Running</li>
+            <li data-state="deciding">Decide</li>
+            <li data-state="error">Error</li>
+          </ol>
+        </div>
+
+        <div class="run-row">
+          <label class="field grow">
+            <span>这次试什么</span>
+            <input id="run-desc" name="run-desc" autocomplete="off" spellcheck="false" placeholder="例如：把 MATRIX_LR 调到 0.05…" />
+          </label>
+          <div class="run-actions">
+            <button type="button" class="btn primary" id="btn-run">启动训练</button>
+            <button type="button" class="btn" id="btn-demo">演示</button>
+            <button type="button" class="btn danger" id="btn-stop">停止</button>
+          </div>
+        </div>
+
+        <div class="metrics" id="last-metrics" hidden>
+          <div><span>val_bpb</span><strong id="m-bpb">—</strong></div>
+          <div><span>VRAM</span><strong id="m-vram">—</strong></div>
+          <div><span>steps</span><strong id="m-steps">—</strong></div>
+          <div><span>device</span><strong id="m-device">—</strong></div>
+        </div>
+
+        <div class="charts" id="charts">
+          <div class="chart-block">
+            <div class="chart-head">
+              <h3>本轮收敛</h3>
+              <p id="live-progress-label">等待 step / loss…</p>
+            </div>
+            <p class="chart-blurb">看训练 loss 是否随 step 稳步下降。曲线持续向下说明模型在学；长时间横盘或上翘，通常意味着学习率过大、不稳定，或当前改动方向不对。</p>
+            <div class="progress-track" aria-hidden="true">
+              <div class="progress-fill" id="progress-fill"></div>
+            </div>
+            <canvas id="chart-loss" width="900" height="320" role="img" aria-label="训练 loss 曲线"></canvas>
+          </div>
+          <div class="chart-block">
+            <div class="chart-head">
+              <h3>历史 val_bpb</h3>
+              <p>越低越好</p>
+            </div>
+            <p class="chart-blurb">比较各次实验的验证指标。实心点是 keep、空心是 discard/crash；虚线是截至目前的最佳值。用来判断新实验是否真正推进了研究，避免只看单次运气。</p>
+            <canvas id="chart-history" width="900" height="320" role="img" aria-label="历史 val_bpb 曲线"></canvas>
+          </div>
+        </div>
+
+        <div class="decide-row" id="decide-row" hidden>
+          <p class="decide-hint">训练已结束，选择是否保留这次改动</p>
+          <div class="run-actions">
+            <button type="button" class="btn keep" id="btn-keep">保留</button>
+            <button type="button" class="btn danger" id="btn-discard">丢弃</button>
+            <button type="button" class="btn ghost" id="btn-crash">记为 crash</button>
+          </div>
+        </div>
+
+        <details class="fold nested" open>
+          <summary>日志</summary>
+          <pre class="log" id="log" aria-live="polite"></pre>
+          <div class="checkpoints">
+            <h3>Checkpoints</h3>
+            <ul id="checkpoint-list"></ul>
+          </div>
+        </details>
+      </section>
+
+      <details class="fold" id="results-panel" open>
         <summary>结果表</summary>
         <div class="fold-body table-wrap">
           <table>
@@ -165,7 +321,7 @@
           </table>
         </div>
       </details>
-    </aside>
+    </div>
   </main>
 
   <footer>
@@ -173,6 +329,5 @@
   </footer>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/static/app.js"></script>
 </body>
 </html>

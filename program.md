@@ -1,5 +1,7 @@
 # autoresearch
 
+> Default brief for **NVIDIA GPU**. On Mac (MPS) or CPU-only, switch to the console **macOS / CPU** guidance (or open `program_macos.md` / `program_cpu.md`).
+
 This is an experiment to have the LLM do its own research.
 
 ## Setup

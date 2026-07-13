@@ -26,7 +26,112 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_TSV = REPO_ROOT / "results.tsv"
 RUN_LOG = REPO_ROOT / "run.log"
 PROGRAM_MD = REPO_ROOT / "program.md"
+PROGRAM_ZH_MD = REPO_ROOT / "program_zh.md"
+PROGRAM_MACOS_MD = REPO_ROOT / "program_macos.md"
+PROGRAM_MACOS_ZH_MD = REPO_ROOT / "program_macos_zh.md"
+PROGRAM_CPU_MD = REPO_ROOT / "program_cpu.md"
+PROGRAM_CPU_ZH_MD = REPO_ROOT / "program_cpu_zh.md"
 CACHE_DIR = Path.home() / ".cache" / "autoresearch"
+
+PROGRAM_PLATFORMS = ("gpu", "macos", "cpu")
+PROGRAM_LANGS = ("en", "zh")
+
+PROGRAM_FILES = {
+    ("gpu", "en"): PROGRAM_MD,
+    ("gpu", "zh"): PROGRAM_ZH_MD,
+    ("macos", "en"): PROGRAM_MACOS_MD,
+    ("macos", "zh"): PROGRAM_MACOS_ZH_MD,
+    ("cpu", "en"): PROGRAM_CPU_MD,
+    ("cpu", "zh"): PROGRAM_CPU_ZH_MD,
+}
+
+PRESET_TO_PLATFORM = {
+    "gpu_default": "gpu",
+    "macos_small": "macos",
+    "cpu_tiny": "cpu",
+}
+
+PLATFORM_TO_PRESET = {
+    "gpu": "gpu_default",
+    "macos": "macos_small",
+    "cpu": "cpu_tiny",
+}
+
+
+def program_path(lang: str = "en", platform: str = "gpu") -> Path:
+    lang_key = (lang or "en").lower().strip()
+    plat_key = (platform or "gpu").lower().strip()
+    if lang_key not in PROGRAM_LANGS:
+        raise ValueError("lang 必须是 en 或 zh")
+    if plat_key not in PROGRAM_PLATFORMS:
+        raise ValueError("platform 必须是 gpu / macos / cpu")
+    return PROGRAM_FILES[(plat_key, lang_key)]
+
+
+def detect_device() -> str:
+    """Return a short compute device tag: cuda:… / mps / cpu."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return f"cuda:{torch.cuda.get_device_name(0)}"
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+    except Exception:
+        # Torch missing/broken: still classify by OS below; tag as cpu.
+        return "cpu"
+
+
+def detect_platform() -> str:
+    """Map host to one of three experiment presets: gpu / macos / cpu.
+
+    Rules (simple, intentional):
+    1. NVIDIA CUDA available → gpu
+    2. Running on macOS (Darwin) → macos
+    3. Otherwise → cpu
+    """
+    import platform as py_platform
+
+    device = detect_device()
+    if device.startswith("cuda"):
+        return "gpu"
+    if py_platform.system() == "Darwin":
+        return "macos"
+    return "cpu"
+
+
+def detect_runtime_env() -> dict[str, Any]:
+    """Always return one of GPU / macOS / CPU — never an empty result."""
+    import platform as py_platform
+    import sys
+
+    device = detect_device()
+    plat = detect_platform()
+    system = py_platform.system()
+    machine = py_platform.machine()
+    preset = PLATFORM_TO_PRESET[plat]
+    labels = {"gpu": "GPU", "macos": "macOS", "cpu": "CPU"}
+
+    if plat == "gpu":
+        reason = f"本机有 NVIDIA GPU（{device}），使用 GPU 预设。"
+    elif plat == "macos":
+        accel = "MPS" if device == "mps" else "CPU 回退"
+        reason = f"本机是 macOS（{machine}，加速：{accel}），使用 macOS 小模型预设。"
+    else:
+        reason = f"本机无 NVIDIA GPU 且非 macOS（{system} {machine}），使用 CPU 迷你预设。"
+
+    return {
+        "ok": True,
+        "platform": plat,
+        "label": labels[plat],
+        "device": device,
+        "os": system,
+        "arch": machine,
+        "python": sys.version.split()[0],
+        "recommended_preset": preset,
+        "reason": reason,
+    }
 
 
 class LoopState(str, Enum):
@@ -263,19 +368,6 @@ def data_ready() -> bool:
     return has_tokenizer or has_shards or any(CACHE_DIR.iterdir())
 
 
-def detect_device() -> str:
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            return f"cuda:{torch.cuda.get_device_name(0)}"
-        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            return "mps"
-        return "cpu"
-    except Exception:
-        return "unknown"
-
-
 PRESETS: dict[str, dict[str, str]] = {
     "gpu_default": {},
     "macos_small": {
@@ -369,7 +461,25 @@ class ExperimentLoop:
             logs = list(self._log_lines[-200:])
         payload["data_ready"] = data_ready()
         payload["device"] = detect_device()
+        payload["detected_platform"] = detect_platform()
+        payload["runtime_env"] = detect_runtime_env()
+        payload["active_preset"] = next(
+            (
+                name
+                for name, values in PRESETS.items()
+                if dict(values) == dict(payload.get("env_overrides") or {})
+            ),
+            None,
+        )
         payload["program_exists"] = PROGRAM_MD.exists()
+        payload["program_platforms"] = {
+            plat: {lng: PROGRAM_FILES[(plat, lng)].exists() for lng in PROGRAM_LANGS}
+            for plat in PROGRAM_PLATFORMS
+        }
+        payload["program_langs"] = {
+            "en": PROGRAM_MD.exists(),
+            "zh": PROGRAM_ZH_MD.exists(),
+        }
         payload["results_count"] = len(payload["history"])
         payload["log_lines"] = logs
         payload["progress_series"] = series
@@ -415,6 +525,82 @@ class ExperimentLoop:
         self._reset_live_buffers()
         self.checkpoint("开始准备数据与 tokenizer…")
         self._spawn(["uv", "run", "prepare.py"], kind="prepare")
+
+    def start_env_setup(self) -> dict[str, Any]:
+        """Install deps for the detected host (GPU / macOS / CPU) and smoke-check torch."""
+        with self.lock:
+            if self.snap.state in {LoopState.RUNNING, LoopState.PREPARING}:
+                raise RuntimeError("已有任务在运行")
+            self.snap.state = LoopState.PREPARING
+            self.snap.error = None
+
+        info = detect_runtime_env()
+        preset_name = info["recommended_preset"]
+        self.apply_preset(preset_name)
+        self._reset_live_buffers()
+        self.checkpoint(
+            f"开始环境准备：{info['label']}（{info['device']}）→ 预设 {preset_name}"
+        )
+
+        repo = str(REPO_ROOT)
+        plat = info["platform"]
+        label = info["label"]
+        device = info["device"]
+        # bash script: sync deps, verify torch, optional quick setup test if data exists
+        script = f"""set -euo pipefail
+cd {repo!r}
+echo "[env-setup] platform={plat} label={label} device={device}"
+echo "[env-setup] 安装依赖：uv sync --extra ui …"
+uv sync --extra ui
+echo "[env-setup] 验证 PyTorch 与设备…"
+uv run python - <<'PY'
+import platform
+import sys
+
+import torch
+
+system = platform.system()
+machine = platform.machine()
+if torch.cuda.is_available():
+    got = "gpu"
+    device = f"cuda:{{torch.cuda.get_device_name(0)}}"
+elif system == "Darwin":
+    got = "macos"
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+else:
+    got = "cpu"
+    device = "cpu"
+
+expected = {plat!r}
+print(f"  Python:  {{sys.version.split()[0]}}")
+print(f"  PyTorch: {{torch.__version__}}")
+print(f"  OS:      {{system}} {{machine}}")
+print(f"  Device:  {{device}}")
+print(f"  Class:   {{got}} (expected {{expected}})")
+if got != expected:
+    raise SystemExit(f"[FAIL] 环境分类不匹配：got={{got}} expected={{expected}}")
+# Tiny tensor smoke on the actual compute device
+dev = torch.device("cuda" if got == "gpu" else ("mps" if device == "mps" else "cpu"))
+t = torch.randn(2, 3, device=dev)
+assert t.shape == (2, 3)
+print(f"  [PASS] tensor ops on {{dev}}")
+print("[env-setup] 依赖与设备检查通过")
+PY
+if [ -d "$HOME/.cache/autoresearch" ] && [ -n "$(ls -A "$HOME/.cache/autoresearch" 2>/dev/null || true)" ]; then
+  echo "[env-setup] 检测到已有数据缓存，运行 test_setup.py --quick …"
+  uv run test_setup.py --quick
+else
+  echo "[env-setup] 尚未准备数据，跳过 test_setup。下一步请点「准备数据」。"
+fi
+echo "[env-setup] DONE — {label} 环境可用"
+"""
+        self._spawn(["bash", "-lc", script], kind="env_setup")
+        return {
+            "platform": plat,
+            "label": label,
+            "device": device,
+            "preset": preset_name,
+        }
 
     def start_run(self, description: str) -> None:
         description = description.strip() or "untitled experiment"
@@ -624,15 +810,16 @@ class ExperimentLoop:
             self.snap.run_pid = None
             self._proc = None
 
-        if kind == "prepare":
+        if kind in {"prepare", "env_setup"}:
+            label = "数据准备" if kind == "prepare" else "环境准备"
             if code == 0:
                 with self.lock:
                     self.snap.state = LoopState.IDLE
-                self.checkpoint("数据准备完成")
+                self.checkpoint(f"{label}完成")
             else:
                 with self.lock:
                     self.snap.state = LoopState.ERROR
-                    self.snap.error = f"prepare.py 退出码 {code}"
+                    self.snap.error = f"{label}失败，退出码 {code}"
                 self.checkpoint(self.snap.error)
             return
 

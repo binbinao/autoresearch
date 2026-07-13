@@ -16,7 +16,16 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from web.loop_engine import PROGRAM_MD, REPO_ROOT, engine
+from web.loop_engine import (
+    PRESET_TO_PLATFORM,
+    PROGRAM_FILES,
+    PROGRAM_PLATFORMS,
+    REPO_ROOT,
+    detect_platform,
+    detect_runtime_env,
+    engine,
+    program_path,
+)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -46,6 +55,8 @@ class DecideBody(BaseModel):
 
 class ProgramBody(BaseModel):
     content: str
+    lang: str = "en"
+    platform: str = "gpu"
 
 
 @app.get("/")
@@ -79,7 +90,30 @@ def api_preset(body: PresetBody) -> dict[str, Any]:
         preset = engine.apply_preset(body.name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, "overrides": preset}
+    platform = PRESET_TO_PLATFORM.get(body.name, "gpu")
+    return {"ok": True, "overrides": preset, "platform": platform, "preset": body.name}
+
+
+@app.get("/api/runtime-env")
+def api_runtime_env() -> dict[str, Any]:
+    return detect_runtime_env()
+
+
+@app.post("/api/env/auto")
+def api_env_auto() -> dict[str, Any]:
+    env = detect_runtime_env()
+    try:
+        overrides = engine.apply_preset(env["recommended_preset"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    engine.checkpoint(f"已按本机环境自动选择 {env['label']} 预设")
+    return {
+        "ok": True,
+        "runtime_env": env,
+        "overrides": overrides,
+        "platform": env["platform"],
+        "preset": env["recommended_preset"],
+    }
 
 
 @app.post("/api/prepare")
@@ -89,6 +123,15 @@ def api_prepare() -> dict[str, Any]:
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"ok": True}
+
+
+@app.post("/api/env-setup")
+def api_env_setup() -> dict[str, Any]:
+    try:
+        info = engine.start_env_setup()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True, **info}
 
 
 @app.post("/api/run")
@@ -124,17 +167,42 @@ def api_decide(body: DecideBody) -> dict[str, Any]:
 
 
 @app.get("/api/program")
-def api_get_program() -> dict[str, str]:
-    if not PROGRAM_MD.exists():
-        return {"content": ""}
-    return {"content": PROGRAM_MD.read_text(encoding="utf-8")}
+def api_get_program(lang: str = "en", platform: str = "gpu") -> dict[str, Any]:
+    try:
+        path = program_path(lang, platform)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    lang_key = (lang or "en").lower().strip()
+    plat_key = (platform or "gpu").lower().strip()
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    available = {
+        plat: {lng: PROGRAM_FILES[(plat, lng)].exists() for lng in ("en", "zh")}
+        for plat in PROGRAM_PLATFORMS
+    }
+    return {
+        "lang": lang_key,
+        "platform": plat_key,
+        "detected_platform": detect_platform(),
+        "path": path.name,
+        "content": content,
+        "available": available,
+    }
 
 
 @app.put("/api/program")
 def api_put_program(body: ProgramBody) -> dict[str, Any]:
-    PROGRAM_MD.write_text(body.content, encoding="utf-8")
-    engine.checkpoint("已保存 program.md")
-    return {"ok": True}
+    try:
+        path = program_path(body.lang, body.platform)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    path.write_text(body.content, encoding="utf-8")
+    engine.checkpoint(f"已保存 {path.name}")
+    return {
+        "ok": True,
+        "lang": body.lang,
+        "platform": body.platform,
+        "path": path.name,
+    }
 
 
 @app.get("/api/results")
